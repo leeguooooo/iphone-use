@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -29,6 +30,26 @@ struct Entry {
 struct Log {
     next: u64,
     entries: VecDeque<Entry>,
+    live: Option<LiveTarget>,
+}
+
+pub const LIVE_TARGET_TTL: Duration = Duration::from_millis(1500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveScope {
+    pub owner_epoch: u64,
+    pub privacy_epoch: u64,
+    pub lifecycle_stamp: u64,
+}
+
+struct LiveTarget {
+    seq: u64,
+    at_ms: u64,
+    owner: String,
+    scope: LiveScope,
+    created: Instant,
+    action_type: &'static str,
+    target: Target,
 }
 
 fn log() -> &'static Mutex<Log> {
@@ -38,20 +59,108 @@ fn log() -> &'static Mutex<Log> {
 
 /// Append one line.
 pub fn record(owner: Option<&str>, text: Line, at_ms: u64) {
+    log()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .append(owner, text, at_ms, None);
+}
+
+pub fn record_scoped(owner: Option<&str>, text: Line, at_ms: u64, scope: LiveScope) {
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    let seq = {
+        let mut log = log()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.append(owner, text, at_ms, runtime.as_ref().map(|_| scope));
+        log.live.as_ref().map(|live| live.seq)
+    };
+    // At most one short-lived target, never geometry in the history ring.
+    if let (Some(runtime), Some(seq)) = (runtime, seq) {
+        runtime.spawn(async move {
+            tokio::time::sleep(LIVE_TARGET_TTL).await;
+            let mut log = log()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if log.live.as_ref().is_some_and(|live| live.seq == seq) {
+                log.live = None;
+            }
+        });
+    }
+}
+
+pub fn clear_live() {
+    log()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .live = None;
+}
+
+impl Log {
+    fn append(
+        &mut self,
+        owner: Option<&str>,
+        mut text: Line,
+        at_ms: u64,
+        scope: Option<LiveScope>,
+    ) {
+        self.next += 1;
+        self.live = match (text.target.take(), text.action_type, owner, scope) {
+            (Some(target), Some(action_type), Some(owner), Some(scope)) => Some(LiveTarget {
+                seq: self.next,
+                at_ms,
+                owner: owner.into(),
+                scope,
+                created: Instant::now(),
+                action_type,
+                target,
+            }),
+            _ => None,
+        };
+        if self.entries.len() >= CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(Entry {
+            seq: self.next,
+            at_ms,
+            owner: owner.map(str::to_string),
+            text,
+        });
+    }
+}
+
+fn live_json(
+    live: &LiveTarget,
+    since: u64,
+    owner: &str,
+    scope: LiveScope,
+    now: Instant,
+) -> Option<Value> {
+    if live.seq <= since
+        || live.owner != owner
+        || live.scope != scope
+        || now
+            .checked_duration_since(live.created)
+            .is_none_or(|age| age >= LIVE_TARGET_TTL)
+    {
+        return None;
+    }
+    Some(
+        json!({"seq":live.seq,"at_ms":live.at_ms,"action_type":live.action_type,"target":live.target}),
+    )
+}
+
+pub fn live_target(since: u64, owner: &str, scope: LiveScope) -> Option<Value> {
     let mut log = log()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    log.next += 1;
-    let seq = log.next;
-    if log.entries.len() >= CAPACITY {
-        log.entries.pop_front();
+    if log
+        .live
+        .as_ref()
+        .is_some_and(|live| live.created.elapsed() >= LIVE_TARGET_TTL)
+    {
+        log.live = None;
     }
-    log.entries.push_back(Entry {
-        seq,
-        at_ms,
-        owner: owner.map(str::to_string),
-        text,
-    });
+    live_json(log.live.as_ref()?, since, owner, scope, Instant::now())
 }
 
 /// Lines after `since` (a `seq` the caller already has), oldest first, at
@@ -76,9 +185,6 @@ fn entry_json(e: &Entry) -> Value {
     }
     if let Some(action_type) = e.text.action_type {
         item["action_type"] = json!(action_type);
-    }
-    if let Some(target) = &e.text.target {
-        item["target"] = json!(target);
     }
     item
 }
@@ -466,6 +572,52 @@ mod tests {
     }
 
     #[test]
+    fn geometry_is_live_only_and_bound_to_current_scope() {
+        let scope = LiveScope {
+            owner_epoch: 1,
+            privacy_epoch: 2,
+            lifecycle_stamp: 3,
+        };
+        let rows = vec![ElementRow {
+            rect: [10.0, 20.0, 40.0, 50.0],
+            ..row("Button", "Done")
+        }];
+        let mut log = Log::default();
+        log.append(
+            Some("agent"),
+            describe(&json!({"type":"tap","element":0}), Some(&rows)),
+            10,
+            Some(scope),
+        );
+        assert!(log.entries[0].text.target.is_none());
+        let history = entry_json(&log.entries[0]);
+        assert!(history.get("target").is_none());
+        let live = log.live.as_ref().unwrap();
+        assert!(live_json(live, 0, "agent", scope, live.created).is_some());
+        assert!(live_json(live, 0, "other", scope, live.created).is_none());
+        assert!(live_json(
+            live,
+            0,
+            "agent",
+            LiveScope {
+                owner_epoch: 9,
+                ..scope
+            },
+            live.created
+        )
+        .is_none());
+        assert!(live_json(live, 0, "agent", scope, live.created + LIVE_TARGET_TTL).is_none());
+        log.append(
+            Some("agent"),
+            describe(&json!({"type":"tap","x":0.2,"y":0.3}), None),
+            11,
+            Some(scope),
+        );
+        assert!(log.live.is_none());
+        assert!(log.entries.iter().all(|entry| entry.text.target.is_none()));
+    }
+
+    #[test]
     fn taps_name_the_element_the_snapshot_showed() {
         let rows = vec![row("Window", ""), row("Cell", "Wi-Fi")];
         let tap = json!({"type":"tap","element":1,"snapshot":"S1"});
@@ -551,7 +703,7 @@ mod tests {
             ..row("Button", "Done")
         }];
         let action = json!({"type":"tap","element":0,"snapshot":"S1"});
-        let target = wire(action.clone(), Some(&rows))["target"].clone();
+        let target = json!(describe(&action, Some(&rows)).target);
         assert_eq!(
             target,
             json!({
@@ -571,7 +723,7 @@ mod tests {
                 target
             );
         }
-        assert!(wire(action.clone(), None).get("target").is_none());
+        assert!(describe(&action, None).target.is_none());
         for rect in [
             [0.0; 4],
             [-1.0, 0.0, 4.0, 4.0],
@@ -583,7 +735,7 @@ mod tests {
                 rect,
                 ..row("Button", "Done")
             }];
-            assert!(wire(action.clone(), Some(&rows)).get("target").is_none());
+            assert!(describe(&action, Some(&rows)).target.is_none());
         }
     }
 
@@ -634,6 +786,9 @@ mod tests {
             let value = wire(json!({"type":"tap","element":0}), Some(&rows));
             assert!(!value.to_string().contains("SECRET"));
             assert!(value.get("target").is_none());
+            assert!(describe(&json!({"type":"tap","element":0}), Some(&rows))
+                .target
+                .is_none());
         }
         for (kind, label) in [("Button", "7"), ("Key", "Q"), ("Button", "A")] {
             let rows = vec![ElementRow {

@@ -647,6 +647,7 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
         let after = slot.as_ref().map(|o| &o.name);
         if before != after {
             state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            crate::activity::clear_live();
             if let Some(previous) = previous.as_ref() { traces.end_owner(&previous.name); }
         }
     }
@@ -806,6 +807,7 @@ impl AppState {
         let mut owner = recover(self.owner.lock());
         if let Some(previous) = owner.take() { traces.end_owner(&previous.name); }
         self.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        crate::activity::clear_live();
     }
 
     /// Stamp "remote driving happened just now" for the idle-release watchdog.
@@ -5686,6 +5688,8 @@ async fn agent_metrics(
 struct AgentActivityQuery {
     since: Option<u64>,
     limit: Option<usize>,
+    #[serde(default)]
+    live: bool,
 }
 
 /// `GET /agent/activity?since=<seq>&limit=<n>` — what the agent did, in plain
@@ -5709,8 +5713,17 @@ async fn agent_activity(
         }
         AgentAuth::Ok => {}
     }
+    if let Some(refusal)=screen_private_refusal(&state) { return refusal; }
+    let scope=ScreenReadScope::capture(&state);
     let limit = query.limit.unwrap_or(20).min(crate::activity::CAPACITY);
     let mut body = crate::activity::recent(query.since.unwrap_or(0), limit);
+    if query.live && scope.current(&state) {
+        if let (Some(owner),Some(stamp))=(scope.owner.as_deref(),scope.lifecycle_stamp) {
+            if let Some(target)=crate::activity::live_target(query.since.unwrap_or(0),owner,crate::activity::LiveScope {
+                owner_epoch:scope.epoch,privacy_epoch:scope.privacy_epoch,lifecycle_stamp:stamp,
+            }) {body["live_target"]=target;}
+        }
+    }
     if let Some(budget) = crate::guard::budget_status(
         crate::guard::Policy::get(),
         &guard_owner(&headers),
@@ -5718,7 +5731,13 @@ async fn agent_activity(
     ) {
         body["budget"] = budget;
     }
-    json_response(StatusCode::OK, body)
+    let mut response=json_response(StatusCode::OK,body);
+    response.headers_mut().insert(header::CACHE_CONTROL,header::HeaderValue::from_static("no-store"));
+    if query.live {
+        response.extensions_mut().insert(ValueReadFence {state,scope,max_bytes:ADVICE_MAX_BODY,
+            failure:serde_json::json!({"ok":false,"error":"activity_scope_changed"})});
+    }
+    response
 }
 
 /// `POST /agent/run` — mark a run boundary for the caller (`X-Phone-Owner`):
@@ -13375,7 +13394,7 @@ async fn agent_actions_scoped(
                     .await;
                 }
                 applied_actions += 1;
-                record_activity(&state, &headers, action, w.cached_window_size());
+                record_activity(&state, &headers, action, w.cached_window_size(), &capture_scope);
                 let mut receipt = serde_json::json!({
                     "index": index,
                     "kind": "action",
@@ -15907,7 +15926,7 @@ async fn agent_input_inner(
                 }
             };
             let body = attach_alert(body, alert);
-            let mut blocks = flow_after_input(&state, &headers, &value);
+            let mut blocks = flow_after_input(&state, &headers, &value, &capture_scope);
             if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
                 blocks.push(("system_capture", capture.clone()));
             }
@@ -16409,7 +16428,8 @@ fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant
 }
 
 /// One applied action on the activity feed, in plain words (`crate::activity`).
-fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, viewport: Option<(f64,f64)>) {
+fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, viewport: Option<(f64,f64)>, scope: &ScreenReadScope) {
+    if !scope.current(state) { return; }
     let rows = action
         .get("snapshot")
         .and_then(serde_json::Value::as_str)
@@ -16422,7 +16442,11 @@ fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::V
             line = line.with_runner_viewport(root.rect[2], root.rect[3]);
         }
     }
-    crate::activity::record(named_owner(headers), line, crate::metrics::now_ms());
+    if let Some(stamp)=scope.lifecycle_stamp {
+        crate::activity::record_scoped(named_owner(headers),line,crate::metrics::now_ms(),crate::activity::LiveScope {
+            owner_epoch:scope.epoch,privacy_epoch:scope.privacy_epoch,lifecycle_stamp:stamp,
+        });
+    }
 }
 
 /// `registry` (after a launch) and `flow_suggestion` (when due) for one
@@ -16431,8 +16455,9 @@ fn flow_after_input(
     state: &AppState,
     headers: &HeaderMap,
     action: &serde_json::Value,
+    scope: &ScreenReadScope,
 ) -> Vec<(&'static str, serde_json::Value)> {
-    record_activity(state, headers, action, None);
+    record_activity(state, headers, action, None, scope);
     if headers.contains_key(FLOW_RUN_HEADER) {
         return Vec::new();
     }
@@ -17940,6 +17965,7 @@ fn set_screen_private(state: &AppState, private: bool, secs: u64) {
     }
     drop(current);
     if changed {
+        crate::activity::clear_live();
         state.cancel_settled_frame_prefetch();
         recover(state.element_snapshots.lock()).clear();
         recover(state.owner_snapshots.lock()).clear();
@@ -22471,6 +22497,22 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_activity_is_no_store_and_fenced_until_publication() {
+        use tower::ServiceExt;
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let state=fixture_app_state(None);
+            *state.owner.lock().unwrap()=Some(PhoneOwner{name:"activity-owner".into(),last_seen:Instant::now()});
+            let response=router(state.clone()).oneshot(axum::http::Request::builder().uri("/agent/activity?live=true").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(),"no-store");
+            state.owner_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+            let bytes=axum::body::to_bytes(response.into_body(),ADVICE_MAX_BODY).await.unwrap();
+            let body:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"],"activity_scope_changed");
+            assert!(body.get("live_target").is_none());
+        });
+    }
+
     #[test]
     fn lease_release_and_expiry_end_the_previous_owners_trace() {
         let state=fixture_app_state(None);

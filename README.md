@@ -341,5 +341,6 @@ verification and include structured recovery strategies. `phone_run_start` with
 checks and subtree reads require an updated runner. See the
 [agent reference](docs/agent-reference.md#action-evidence-and-recovery).
 
-Activity history omits arbitrary tap coordinates, input identifiers and keypad
-keys. Green agent feedback is limited to nonsensitive named element targets.
+Activity history never stores click geometry, input identifiers or keypad keys.
+Green feedback uses only the latest nonsensitive named target, bound to the live
+owner/privacy scope, erased after 1.5 seconds and excluded from history.

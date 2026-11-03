@@ -1680,7 +1680,7 @@ or editable state.
 The control panel shows nonsensitive named element targets in green: a ripple and, when available,
 an outline. Element geometry is a snapshot's rectangle centre, not proof of the
 actual dispatched hit point. Runner-point targets are drawn only with a known
-runner viewport. Unresolved, stale and historical targets are not animated. Arbitrary coordinate taps, keypad keys and input fields have no point/rect in the activity history; exact keypad tap sequences must not be retained.
+runner viewport. Unresolved, stale and historical targets are not animated. Activity history never contains point/rect geometry. The panel explicitly requests live=true; only the latest eligible target is exposed as live_target, bound to the active owner/privacy/lifecycle scope and erased after 1.5 seconds. Private mode and ownership changes clear it; live responses use no-store and a publication scope fence. Arbitrary coordinate taps, keypad keys and input fields have no geometry even in live feedback.
 
 `POST /agent/run {"action":"start","run_id":"task-1","trace":true}`
 (or `phone_run_start(trace=true)`) opts into a redacted action timeline. This

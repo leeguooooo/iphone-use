@@ -106,7 +106,7 @@ test('poll boot suppresses history, then draws only unseen actions', async () =>
   ctx.fetch = async () => ({ ok: true, json: async () => feed });
   await ctx.pollAgentActivity();
   assert.equal(nodes.length, 0);
-  feed = { next: 2, items: [item(normalized), { ...item(normalized), seq: 2 }] };
+  feed = { next: 2, items: [item(normalized), { ...item(normalized), seq: 2 }], live_target: { ...item(normalized), seq: 2 } };
   await ctx.pollAgentActivity();
   assert.equal(nodes.length, 1);
   await ctx.pollAgentActivity();
@@ -119,8 +119,19 @@ test('hidden tab draws no fresh agent feedback', async () => {
   let feed = { next: 1, items: [] };
   ctx.fetch = async () => ({ ok: true, json: async () => feed });
   await ctx.pollAgentActivity();
-  feed = { next: 2, items: [{ ...item({coordinate_space:'runner_points',point:[25,50],viewport:[100,200]}), seq: 2 }] };
+  const fresh = { ...item({coordinate_space:'runner_points',point:[25,50],viewport:[100,200]}), seq: 2 };
+  feed = { next: 2, items: [fresh], live_target: fresh };
   ctx.document.visibilityState = 'hidden';
   await ctx.pollAgentActivity();
   assert.equal(nodes.length, 0);
+});
+
+
+test('historical item geometry is never replayed without live_target', async () => {
+  const {ctx,nodes}=panel();
+  let feed={next:1,items:[]};ctx.fetch=async()=>({ok:true,json:async()=>feed});
+  await ctx.pollAgentActivity();
+  feed={next:2,items:[{...item(normalized),seq:2}]};
+  await ctx.pollAgentActivity();
+  assert.equal(nodes.length,0);
 });

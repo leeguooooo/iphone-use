@@ -6188,14 +6188,16 @@ async function pollAgentActivity() {
   try {
     const since = agentActivityCursor ?? 0;
     const limit = agentActivityCursor === null ? 0 : 20;
-    const r = await fetch(`${BASE}/agent/activity?since=${since}&limit=${limit}`, { cache: 'no-store' });
+    const r = await fetch(`${BASE}/agent/activity?since=${since}&limit=${limit}&live=${agentActivityCursor !== null}`, { cache: 'no-store' });
     if (!r.ok) return;
     const feed = await r.json();
     const initial = agentActivityCursor === null;
     if (Number.isFinite(feed?.next)) agentActivityCursor = feed.next;
     const items = Array.isArray(feed?.items) ? feed.items : [];
-    if (initial || !items.length) return;
-    items.filter(item => Number.isFinite(item.seq) && item.seq > since).slice(-5).forEach(showAgentActivityTarget);
+    if (initial) return;
+    const live = feed.live_target;
+    if (live && Number.isFinite(live.seq) && live.seq > since) showAgentActivityTarget(live);
+    if (!items.length) return;
     const last = items[items.length - 1];
     const who = document.createElement('span');
     who.className = 'who';
