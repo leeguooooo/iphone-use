@@ -104,6 +104,12 @@ pub(crate) fn post_mutates_screen(path: &str) -> bool {
         || path.ends_with("/elements") || path.ends_with("/element"))
 }
 
+/// How many complete trees [`RunnerClient::served_tree`] can look back over.
+/// An agent acts on a tree it read moments ago; a few cover a batch.
+const SERVED_TREES_CAP: usize = 8;
+
+type ReadScope = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -137,6 +143,15 @@ pub struct RunnerClient {
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
+    /// The last few complete trees read, newest last. A snapshot-bound action
+    /// whose token no longer matches the live tree looks its snapshot up here
+    /// to learn which element the index named (see [`Self::served_tree`]).
+    /// Each keeps the authorization it was read under, so a tree read before
+    /// an owner change or a privacy hold is never used afterwards.
+    served_trees: std::collections::VecDeque<(std::sync::Arc<Vec<ElementRow>>, Option<ReadScope>)>,
+    /// `(snapshot index, live index)` when the current snapshot-bound action
+    /// found its row in a changed tree; the response reports it.
+    pub rebound_row: Option<(usize, usize)>,
     /// Whether the last [`Self::elements`] kept the tree read without
     /// `isVisible` (see [`Self::bounded_source`]): its rows' `visible` is
     /// geometric, and the next read keeps that mode until the tree shrinks
@@ -389,6 +404,8 @@ impl RunnerClient {
             volume_buttons: false,
             system_capture_request: false,
             last_tree: None,
+            served_trees: std::collections::VecDeque::new(),
+            rebound_row: None,
             lite_source: false,
             probe: ProbeMemory::default(),
             full_visibility: full_visibility_requested(),
@@ -2463,6 +2480,13 @@ impl RunnerClient {
         }
         self.last_tree = SnapshotCoverage::from_tree(tree).is_complete()
             .then(|| (std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
+        if let Some((tree, _)) = &self.last_tree {
+            let scope = self.tree_scope.clone().or_else(|| self.observation_scope.clone());
+            self.served_trees.push_back((tree.clone(), scope));
+            while self.served_trees.len() > SERVED_TREES_CAP {
+                self.served_trees.pop_front();
+            }
+        }
         rows
     }
 
@@ -2569,6 +2593,23 @@ impl RunnerClient {
         (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
     }
 
+    /// The newest recently read complete tree that `is_snapshot` accepts (the
+    /// caller matches its snapshot token). Unlike [`Self::recent_tree`] it may
+    /// predate later actions: it says which element an old index named, never
+    /// what the screen shows now.
+    pub fn served_tree(
+        &self,
+        is_snapshot: impl Fn(&[ElementRow]) -> bool,
+    ) -> Option<std::sync::Arc<Vec<ElementRow>>> {
+        if self.tree_scope.as_ref().or(self.observation_scope.as_ref()).is_some_and(|allowed| !allowed()) { return None; }
+        self.served_trees
+            .iter()
+            .rev()
+            .filter(|(_, scope)| scope.as_ref().is_none_or(|allowed| allowed()))
+            .find(|(rows, _)| is_snapshot(rows))
+            .map(|(rows, _)| rows.clone())
+    }
+
     pub fn settle_frames_usable(&self) -> bool {
         self.settle_frames_paused_until
             .is_none_or(|until| std::time::Instant::now() >= until)
@@ -2607,7 +2648,12 @@ impl RunnerClient {
     }
 
     pub fn bind_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        // Trees already served stay: each lapses on its own scope, and a batch
+        // or an observed action must not forget the snapshot its steps name.
+        let mut served = std::mem::take(&mut self.served_trees);
+        served.retain(|(_, scope)| scope.is_some());
         self.forget_observations();
+        self.served_trees = served;
         self.tree_scope = None;
         self.observation_scope = Some(allowed);
     }
@@ -2625,6 +2671,7 @@ impl RunnerClient {
     /// Discard screen-derived data after the caller's authorization scope changes.
     pub fn forget_observations(&mut self) {
         self.last_tree = None;
+        self.served_trees.clear();
         self.settled_frame = None;
         self.no_alert_at = None;
     }
@@ -2857,6 +2904,7 @@ impl RunnerClient {
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;
+        self.served_trees.clear();
     }
 
     /// Drop the cached window size, returning it: the next gesture reads the

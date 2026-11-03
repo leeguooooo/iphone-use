@@ -1917,9 +1917,11 @@ impl PhoneHandler {
             open_world_hint = true,
         ),
         description = "Tap one element by its zero-based index and snapshot token \
-        from the SAME phone_elements response. The daemon re-reads the tree and \
-        refuses the action if the UI changed, so a stale element reference cannot \
-        silently tap a different control. Use identifier/kind/label/state fields to \
+        from the SAME phone_elements response. The daemon re-reads the tree; a small \
+        change on the same screen (clock, badge, a flipped switch) still finds the row \
+        by kind, identifier, label and enclosing rows, while another page, a new alert, \
+        or look-alikes it cannot tell apart refuse with nothing sent, so a stale element \
+        reference cannot silently tap a different control. Use identifier/kind/label/state fields to \
         choose the index. Snapshot refs are ephemeral: never persist them in a flow."
     )]
     async fn phone_tap_element(

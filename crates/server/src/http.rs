@@ -6999,7 +6999,12 @@ fn snapshot_element_outcome(
     result: Result<(), SnapshotElementTapError>,
     w: &mut crate::runner::RunnerClient,
     context: &str,
+    detail: &mut Option<serde_json::Value>,
 ) -> Result<anyhow::Result<()>, RunnerControlOutcome> {
+    let rebound = w.rebound_row.take();
+    if let (Some((from, to)), Ok(()) | Err(SnapshotElementTapError::AfterDispatch(_))) = (rebound, &result) {
+        *detail = Some(serde_json::json!({"rebound": {"from": from, "to": to}}));
+    }
     match result {
         Ok(()) => Ok(Ok(())),
         Err(SnapshotElementTapError::Invalid) => Err(RunnerControlOutcome::InvalidElementSnapshot),
@@ -7078,19 +7083,303 @@ async fn fetch_snapshot_row(
         .filter(|snapshot| !snapshot.is_empty())
         .ok_or(SnapshotElementTapError::Invalid)?;
 
-    let rows = w
-        .elements()
+    w.rebound_row = None;
+    // Taken before the fresh read: that read joins the bounded history and
+    // could push the caller's snapshot out of it.
+    let served = w.served_tree(|served| {
+        element_snapshot_id(served).is_ok_and(|id| id == expected_snapshot)
+    });
+    let snapshot = w
+        .element_snapshot()
         .await
         .map_err(SnapshotElementTapError::BeforeDispatch)?;
+    let rows = snapshot.rows;
     let current_snapshot =
         element_snapshot_id(&rows).map_err(SnapshotElementTapError::BeforeDispatch)?;
     if current_snapshot != expected_snapshot {
-        return Err(SnapshotElementTapError::Stale);
+        // The screen changed somewhere (a clock tick, a badge, a keyboard
+        // suggestion). That alone does not make the caller's row unknowable:
+        // if the snapshot it read is still remembered and that row is still
+        // the one element of its identity here, act on it in the live tree.
+        let Some(served) = served else {
+            return Err(SnapshotElementTapError::Refused(
+                "stale_element_snapshot",
+                SNAPSHOT_FORGOTTEN_HINT,
+            ));
+        };
+        if index >= served.len() {
+            return Err(SnapshotElementTapError::Invalid);
+        }
+        // A cut-off tree can hide a second look-alike of the row.
+        if !snapshot.coverage.is_complete() {
+            return Err(SnapshotElementTapError::Refused(
+                "target_scope_unproven",
+                TARGET_SCOPE_UNPROVEN_HINT,
+            ));
+        }
+        return match rebind_snapshot_row(&served, index, &rows) {
+            RowRebind::Index(live) => {
+                // A system alert may not show in the tree at all, and a click
+                // under it is acknowledged without effect: ask runner live.
+                w.forget_alert_probe();
+                if w
+                    .alert_summary()
+                    .await
+                    .map_err(SnapshotElementTapError::BeforeDispatch)?
+                    .is_some()
+                {
+                    return Err(SnapshotElementTapError::Stale);
+                }
+                tracing::info!(
+                    "snapshot row {index} rebound to live row {live} after the screen changed"
+                );
+                w.rebound_row = Some((index, live));
+                Ok((rows, live))
+            }
+            RowRebind::Ambiguous => Err(SnapshotElementTapError::Ambiguous),
+            RowRebind::Stale => Err(SnapshotElementTapError::Stale),
+        };
     }
     if index >= rows.len() {
         return Err(SnapshotElementTapError::Invalid);
     }
     Ok((rows, index))
+}
+
+/// The screen changed and the snapshot the caller named is no longer kept
+/// (older than the last few reads, or from before a restart or a privacy
+/// change), so its row cannot be recognized again.
+const SNAPSHOT_FORGOTTEN_HINT: &str = "the screen changed and that snapshot is no longer remembered; refresh /agent/elements and choose the element again";
+
+/// Where an old snapshot row lives in a newer tree of the same screen.
+#[derive(Debug, PartialEq, Eq)]
+enum RowRebind {
+    Index(usize),
+    /// Gone, a different app, or a row with nothing durable to recognize it by.
+    Stale,
+    /// More than one live row carries its identity and nothing tells them apart.
+    Ambiguous,
+}
+
+/// A row's type, accessibility identifier and stable label (see [`row_identity`]).
+type RowIdentity<'a> = Option<(&'a str, &'a str, &'a str)>;
+
+/// What recognizes a row across two reads of a changing screen: its type,
+/// accessibility identifier and label. Never its value — a text field's
+/// contents, a switch position or a slider fraction change under the same
+/// control — nor its frame, which a banner or a keyboard moves. A text input
+/// whose label is just its contents has no stable label. `None` when nothing
+/// durable is left; such a row is only ever addressed by its exact snapshot.
+fn row_identity(row: &crate::runner::ElementRow) -> RowIdentity<'_> {
+    let identifier = row.identifier.as_deref().unwrap_or("");
+    let volatile_label = TEXT_INPUT_KINDS.contains(&row.kind.as_str())
+        && row.value.as_deref().is_some_and(|value| value == row.label);
+    let label = if volatile_label { "" } else { row.label.as_str() };
+    if row.kind.is_empty() || row.kind == "Application" || (identifier.is_empty() && label.is_empty()) {
+        return None;
+    }
+    Some((row.kind.as_str(), identifier, label))
+}
+
+/// The identities of the rows enclosing `index`, outermost first: the
+/// section, cell or sheet a duplicated control sits in.
+fn row_ancestry(
+    rows: &[crate::runner::ElementRow],
+    index: usize,
+) -> Vec<RowIdentity<'_>> {
+    let mut depth = rows[index].depth;
+    let mut chain = Vec::new();
+    for row in rows[..index].iter().rev() {
+        if row.depth < depth {
+            depth = row.depth;
+            chain.push(row_identity(row));
+        }
+    }
+    chain.reverse();
+    chain
+}
+
+/// Share of the old screen's recognizable rows that must still be there for a
+/// fresh tree to count as the same screen. A clock tick, a badge or a keyboard
+/// keeps nearly all of them; a push to another page keeps almost none.
+const SAME_SCREEN_MIN_RETAINED: f64 = 0.75;
+
+/// Whether `new` still shows the screen `old` was read from, not another page
+/// of the same app with look-alike controls (every page has a `返回`). The
+/// navigation bars must agree and most recognizable rows must remain.
+fn same_screen(old: &[crate::runner::ElementRow], new: &[crate::runner::ElementRow]) -> bool {
+    fn bars(rows: &[crate::runner::ElementRow]) -> Vec<RowIdentity<'_>> {
+        rows.iter()
+            .filter(|row| row.kind == "NavigationBar")
+            .map(row_identity)
+            .collect()
+    }
+    if bars(old) != bars(new) {
+        return false;
+    }
+    // An alert or sheet that came up covers the screen the index was read
+    // from: the caller has to see it, not have its tap land underneath.
+    // Matched by title AND contents: a same-titled sheet for another item
+    // ("删除这条备忘录？") is a different question.
+    fn overlays(rows: &[crate::runner::ElementRow]) -> Vec<Vec<RowIdentity<'_>>> {
+        (0..rows.len())
+            .filter(|&i| matches!(rows[i].kind.as_str(), "Alert" | "Sheet"))
+            .map(|i| {
+                std::iter::once(&rows[i])
+                    .chain(rows[i + 1..].iter().take_while(|row| row.depth > rows[i].depth))
+                    .map(row_identity)
+                    .collect()
+            })
+            .collect()
+    }
+    let mut old_overlays = overlays(old);
+    for overlay in overlays(new) {
+        match old_overlays.iter().position(|old| overlay[0].is_some() && *old == overlay) {
+            Some(position) => {
+                old_overlays.swap_remove(position);
+            }
+            None => return false,
+        }
+    }
+    // The selected tab says which page is up; the rest of the bar does not.
+    fn selected_tabs(rows: &[crate::runner::ElementRow]) -> Vec<RowIdentity<'_>> {
+        (0..rows.len())
+            .filter(|&i| rows[i].kind == "TabBar")
+            .flat_map(|i| rows[i + 1..].iter().take_while(move |row| row.depth > rows[i].depth))
+            .filter(|row| row.selected == Some(true))
+            .map(row_identity)
+            .collect()
+    }
+    if selected_tabs(old) != selected_tabs(new) {
+        return false;
+    }
+    // Bars survive a tab switch or a push; only the page's own rows say the
+    // page is the same.
+    let mut remaining: std::collections::HashMap<_, usize> = std::collections::HashMap::new();
+    for identity in page_rows(new).filter_map(row_identity) {
+        *remaining.entry(identity).or_default() += 1;
+    }
+    let (mut known, mut retained) = (0_usize, 0_usize);
+    for identity in page_rows(old).filter_map(row_identity) {
+        known += 1;
+        if let Some(count) = remaining.get_mut(&identity).filter(|count| **count > 0) {
+            *count -= 1;
+            retained += 1;
+        }
+    }
+    known > 0 && retained as f64 >= known as f64 * SAME_SCREEN_MIN_RETAINED
+}
+
+/// Rows outside the navigation, tab and tool bars.
+fn page_rows(
+    rows: &[crate::runner::ElementRow],
+) -> impl Iterator<Item = &crate::runner::ElementRow> {
+    let mut bar_depth: Option<u32> = None;
+    rows.iter().filter(move |row| {
+        if bar_depth.is_some_and(|depth| row.depth <= depth) {
+            bar_depth = None;
+        }
+        if bar_depth.is_none() && matches!(row.kind.as_str(), "NavigationBar" | "TabBar" | "Toolbar") {
+            bar_depth = Some(row.depth);
+        }
+        bar_depth.is_none()
+    })
+}
+
+/// Find the row an old snapshot's `index` named in a fresh tree, failing
+/// closed. The row must be the only one of its identity in BOTH trees — or,
+/// failing that, the only one of its identity and ancestry in both — so a
+/// duplicate that appeared, or one that was already there, never lets the
+/// action land on its twin. Both trees must come from the same app.
+fn rebind_snapshot_row(
+    old: &[crate::runner::ElementRow],
+    index: usize,
+    new: &[crate::runner::ElementRow],
+) -> RowRebind {
+    let (Some(old_app), Some(new_app)) = (active_application(old), active_application(new)) else {
+        return RowRebind::Stale;
+    };
+    if old_app != new_app || !same_screen(old, new) {
+        return RowRebind::Stale;
+    }
+    let Some(identity) = old.get(index).and_then(row_identity) else {
+        return RowRebind::Stale;
+    };
+    let same = |rows: &[crate::runner::ElementRow]| -> Vec<usize> {
+        (0..rows.len())
+            .filter(|&i| row_identity(&rows[i]) == Some(identity))
+            .collect()
+    };
+    // An unlabeled cell is a list item nothing tells apart from the next one:
+    // after a scroll, the same button in another item has the same ancestry.
+    let mut depth = old[index].depth;
+    let mut anonymous_item = false;
+    for row in old[..index].iter().rev() {
+        if row.depth < depth {
+            depth = row.depth;
+            anonymous_item |= row.kind == "Cell" && row_identity(row).is_none();
+        }
+    }
+    if anonymous_item {
+        return RowRebind::Stale;
+    }
+    let (old_same, new_same) = (same(old), same(new));
+    let ancestry = row_ancestry(old, index);
+    let found = match (old_same.as_slice(), new_same.as_slice()) {
+        (_, []) => return RowRebind::Stale,
+        // Unique, but under another row (a list that scrolled: one 删除 for
+        // a different item) is a different element.
+        ([_], [live]) if row_ancestry(new, *live) != ancestry => return RowRebind::Stale,
+        ([_], [live]) => *live,
+        _ => {
+            let placed = |rows: &[crate::runner::ElementRow], same: &[usize]| -> Vec<usize> {
+                same.iter()
+                    .copied()
+                    .filter(|&i| row_ancestry(rows, i) == ancestry)
+                    .collect()
+            };
+            match (placed(old, &old_same).as_slice(), placed(new, &new_same).as_slice()) {
+                ([_], [live]) => *live,
+                (_, []) => return RowRebind::Stale,
+                _ => return RowRebind::Ambiguous,
+            }
+        }
+    };
+    // Unlabeled containers are not rows, so a list item built from them
+    // leaves no ancestor to tell one item's 删除 from the next. The rows
+    // around it (the item's title, its neighbours) do.
+    if row_neighbours(old, index) != row_neighbours(new, found) {
+        return RowRebind::Stale;
+    }
+    RowRebind::Index(found)
+}
+
+/// How many identified rows on each side of a rebound row must read the same.
+const REBIND_NEIGHBOURS: usize = 2;
+
+/// The identities of the nearest identified rows before and after `index`.
+/// Unidentified rows are skipped, not compared: two of them always read the
+/// same, so a `删除` button between blank rows would otherwise match the
+/// `删除` of another list item. Fewer rows on a side (the tree's end) keeps
+/// that side short, so a row that became first or last does not match.
+fn row_neighbours(
+    rows: &[crate::runner::ElementRow],
+    index: usize,
+) -> (Vec<RowIdentity<'_>>, Vec<RowIdentity<'_>>) {
+    let before = rows[..index]
+        .iter()
+        .rev()
+        .map(row_identity)
+        .filter(Option::is_some)
+        .take(REBIND_NEIGHBOURS)
+        .collect();
+    let after = rows[index + 1..]
+        .iter()
+        .map(row_identity)
+        .filter(Option::is_some)
+        .take(REBIND_NEIGHBOURS)
+        .collect();
+    (before, after)
 }
 
 /// How long a tree read stays reusable for a snapshot-bound action.
@@ -7108,6 +7397,7 @@ async fn fetch_snapshot_row_reusing(
     w: &mut crate::runner::RunnerClient,
     value: &serde_json::Value,
 ) -> Result<(Vec<crate::runner::ElementRow>, usize, bool), SnapshotElementTapError> {
+    w.rebound_row = None;
     let index = value
         .get("element")
         .and_then(serde_json::Value::as_u64)
@@ -9152,7 +9442,7 @@ async fn runner_control_with_client(
         }
         "tap" if v.get("element").is_some() => {
             let result = tap_snapshot_element(w, v).await;
-            match snapshot_element_outcome(result, w, "control snapshot tap") {
+            match snapshot_element_outcome(result, w, "control snapshot tap", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9163,7 +9453,7 @@ async fn runner_control_with_client(
             let was_actionable = actionable.load(Ordering::Acquire);
             let allowed = || (!was_actionable || actionable.load(Ordering::Acquire)) && dispatch_allowed.is_none_or(|allowed| allowed());
             let result = set_value_snapshot_element(w, v, &allowed).await;
-            match snapshot_element_outcome(result, w, "control set_value") {
+            match snapshot_element_outcome(result, w, "control set_value", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9179,7 +9469,7 @@ async fn runner_control_with_client(
                 return RunnerControlOutcome::UnsupportedPerformAction;
             }
             let result = perform_snapshot_element(w, v).await;
-            match snapshot_element_outcome(result, w, "control perform") {
+            match snapshot_element_outcome(result, w, "control perform", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9257,7 +9547,7 @@ async fn runner_control_with_client(
         }
         "scroll" if v.get("element").is_some() => {
             let result = scroll_snapshot_element(w, v, guard_alert, detail).await;
-            match snapshot_element_outcome(result, w, "control element scroll") {
+            match snapshot_element_outcome(result, w, "control element scroll", detail) {
                 Ok(result) => result,
                 Err(outcome) => return outcome,
             }
@@ -9763,7 +10053,7 @@ fn stale_element_snapshot_response() -> Response {
             .status(StatusCode::CONFLICT)
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                r#"{"ok":false,"error":"stale_element_snapshot","outcome":"not_sent","retry_safe":true,"hint":"refresh /agent/elements and choose the element again"}"#,
+                r#"{"ok":false,"error":"stale_element_snapshot","outcome":"not_sent","retry_safe":true,"hint":"the screen changed too much to find that row again (another page, a new alert, or the row is gone); refresh /agent/elements and choose the element again"}"#,
             ))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
     )
@@ -10468,7 +10758,7 @@ async fn direct_agent_action(
         }
         "tap" if value.get("element").is_some() => {
             let result = tap_snapshot_element(w, value).await;
-            match snapshot_element_outcome(result, w, "agent snapshot tap") {
+            match snapshot_element_outcome(result, w, "agent snapshot tap", detail) {
                 Ok(result) => Some(result),
                 Err(outcome) => return outcome,
             }
@@ -10744,6 +11034,9 @@ async fn direct_control(
         let mut body = serde_json::json!({"ok":true});
         if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
             body["system_capture"] = capture.clone();
+        }
+        if let Some(rebound) = detail.as_ref().and_then(|value| value.get("rebound")) {
+            body["rebound"] = rebound.clone();
         }
         return with_security_headers(
             Response::builder()
@@ -12882,6 +13175,9 @@ async fn agent_actions_scoped(
                 }
                 if let Some(capture) = step_detail.as_ref().and_then(|value| value.get("system_capture")) {
                     receipt["system_capture"] = capture.clone();
+                }
+                if let Some(rebound) = step_detail.as_ref().and_then(|value| value.get("rebound")) {
+                    receipt["rebound"] = rebound.clone();
                 }
                 step_results.push(receipt);
                 if *after_ms > 0
@@ -15389,6 +15685,9 @@ async fn agent_input_inner(
             let mut blocks = flow_after_input(&state, &headers, &value);
             if let Some(capture) = detail.as_ref().and_then(|value| value.get("system_capture")) {
                 blocks.push(("system_capture", capture.clone()));
+            }
+            if let Some(rebound) = detail.as_ref().and_then(|value| value.get("rebound")) {
+                blocks.push(("rebound", rebound.clone()));
             }
             if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
                 blocks.push(("agent_focus", block));
@@ -29885,4 +30184,242 @@ async fn browser_chrome(axum::Json(raw): axum::Json<serde_json::Value>) -> Respo
     }
     #[cfg(not(target_os = "macos"))]
     { let _=raw; (StatusCode::NOT_IMPLEMENTED,axum::Json(serde_json::json!({"ok":false,"error":"chrome_requires_paired_mac"}))).into_response() }
+}
+
+#[cfg(test)]
+mod snapshot_rebind_tests {
+    //! An index from an older snapshot of the same screen still names its
+    //! row after small changes, and never another row.
+    use super::*;
+    use crate::runner::ElementRow;
+
+    fn row(depth: u32, kind: &str, label: &str) -> ElementRow {
+        ElementRow { kind: kind.into(), label: label.into(), depth, ..Default::default() }
+    }
+
+    fn with_value(mut row: ElementRow, value: &str) -> ElementRow {
+        row.value = Some(value.into());
+        row
+    }
+
+    /// A settings page: clock, navigation bar, a switch and a few cells.
+    fn settings() -> Vec<ElementRow> {
+        vec![
+            row(0, "Application", "设置"),
+            row(1, "StaticText", "10:41"),
+            row(1, "NavigationBar", "无线局域网"),
+            row(2, "Button", "设置"),
+            row(1, "Table", ""),
+            with_value(row(2, "Switch", "无线局域网"), "0"),
+            row(2, "Cell", "Home"),
+            row(2, "Cell", "Office"),
+            row(2, "Button", "其他网络"),
+        ]
+    }
+
+    #[test]
+    fn a_clock_tick_and_a_switch_flip_keep_every_row() {
+        let old = settings();
+        let mut new = settings();
+        new[1].label = "10:42".into();
+        new[5].value = Some("1".into());
+        new.insert(4, row(1, "StaticText", "已连接"));
+        assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Index(8));
+        assert_eq!(rebind_snapshot_row(&old, 8, &new), RowRebind::Index(9));
+        // The clock is one of the 设置 button's two neighbours: a tick there
+        // already makes that row unprovable.
+        let mut clock_only = settings();
+        clock_only[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&old, 3, &clock_only), RowRebind::Stale);
+    }
+
+    #[test]
+    fn another_app_or_another_page_is_stale() {
+        let old = settings();
+        let mut other_app = settings();
+        other_app[0].label = "Safari".into();
+        assert_eq!(rebind_snapshot_row(&old, 3, &other_app), RowRebind::Stale);
+
+        // Pushed to a detail page: the back button reads the same, the page
+        // does not.
+        let detail = vec![
+            row(0, "Application", "设置"),
+            row(1, "NavigationBar", "Home"),
+            row(2, "Button", "设置"),
+            row(1, "Table", ""),
+            row(2, "Button", "忽略此网络"),
+        ];
+        assert_eq!(rebind_snapshot_row(&old, 3, &detail), RowRebind::Stale);
+    }
+
+    #[test]
+    fn most_of_the_screen_replaced_is_stale_even_under_the_same_bar() {
+        let old = settings();
+        let mut new = vec![old[0].clone(), old[2].clone(), old[3].clone()];
+        new.extend((0..6).map(|i| row(2, "Cell", &format!("其他 {i}"))));
+        assert_eq!(rebind_snapshot_row(&old, 3, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn the_same_button_under_another_row_is_stale() {
+        let screen = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(2, "Cell", item));
+            rows.push(row(3, "Button", "删除"));
+            rows
+        };
+        let (old, new) = (screen("Item 5"), screen("Item 12"));
+        assert_eq!(rebind_snapshot_row(&old, 10, &new), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&old, 10, &screen("Item 5")), RowRebind::Index(10));
+    }
+
+    #[test]
+    fn an_alert_that_came_up_is_stale() {
+        let old = settings();
+        let mut new = settings();
+        new.push(row(1, "Alert", "允许“设置”使用你的位置？"));
+        new.push(row(2, "Button", "允许"));
+        assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_replaced_alert_is_stale() {
+        let mut old = settings();
+        old.push(row(1, "Alert", "要加入“Home”吗？"));
+        let mut new = settings();
+        new.push(row(1, "Alert", "密码错误"));
+        assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&old, 7, &old.clone()), RowRebind::Index(7));
+    }
+
+    #[test]
+    fn a_button_in_an_unlabeled_cell_is_stale() {
+        let mut old = settings();
+        old.push(row(2, "Cell", ""));
+        old.push(row(3, "Button", "删除"));
+        let mut new = old.clone();
+        new[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&old, 10, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_tab_switch_kept_only_by_its_bars_is_stale() {
+        let tabs = |page: &[(&str, &str)]| {
+            let mut rows = vec![row(0, "Application", "时钟"), row(1, "TabBar", "")];
+            rows.extend(["世界时钟", "闹钟", "秒表", "计时器"].map(|tab| row(2, "Button", tab)));
+            rows.extend(page.iter().map(|(kind, label)| row(1, kind, label)));
+            rows
+        };
+        let old = tabs(&[("Button", "编辑"), ("StaticText", "北京")]);
+        let new = tabs(&[("Button", "编辑"), ("StaticText", "07:00")]);
+        assert_eq!(rebind_snapshot_row(&old, 6, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_same_titled_sheet_for_another_item_is_stale() {
+        let sheet = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(1, "Sheet", "删除备忘录？"));
+            rows.push(row(2, "StaticText", item));
+            rows.push(row(2, "Button", "删除"));
+            rows
+        };
+        let (old, new) = (sheet("购物清单"), sheet("会议记录"));
+        assert_eq!(rebind_snapshot_row(&old, 11, &new), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&old, 11, &sheet("购物清单")), RowRebind::Index(11));
+    }
+
+    #[test]
+    fn another_selected_tab_is_stale() {
+        let tabs = |selected: usize| {
+            let mut rows = settings();
+            rows.push(row(1, "TabBar", ""));
+            for (i, tab) in ["收藏", "最近"].into_iter().enumerate() {
+                let mut tab = row(2, "Button", tab);
+                tab.selected = (i == selected).then_some(true);
+                rows.push(tab);
+            }
+            rows
+        };
+        assert_eq!(rebind_snapshot_row(&tabs(0), 7, &tabs(1)), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&tabs(0), 7, &tabs(0)), RowRebind::Index(7));
+    }
+
+    #[test]
+    fn a_button_in_another_unlabeled_list_item_is_stale() {
+        // Items built from unlabeled containers emit no row of their own:
+        // only the item's text sits next to its 删除.
+        let list = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(3, "StaticText", item));
+            rows.push(row(3, "Button", "删除"));
+            rows
+        };
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 10, &list("Item 12")), RowRebind::Stale);
+        let mut clock = list("Item 5");
+        clock[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 10, &clock), RowRebind::Index(10));
+    }
+
+    #[test]
+    fn a_title_beyond_blank_rows_still_tells_items_apart() {
+        // Unlabeled controls between an item's text and its 删除 read the
+        // same in every item; the text further up is what tells them apart.
+        let list = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(3, "StaticText", item));
+            rows.extend((0..3).map(|_| row(3, "Button", "")));
+            rows.push(row(3, "Button", "删除"));
+            rows
+        };
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 13, &list("Item 12")), RowRebind::Stale);
+        let mut clock = list("Item 5");
+        clock[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 13, &clock), RowRebind::Index(13));
+    }
+
+    #[test]
+    fn a_vanished_row_is_stale() {
+        let old = settings();
+        let mut new = settings();
+        new.remove(8);
+        assert_eq!(rebind_snapshot_row(&old, 8, &new), RowRebind::Stale);
+    }
+
+    #[test]
+    fn a_twin_is_told_apart_by_its_section_or_refused() {
+        let section = |name: &str| {
+            vec![row(1, "Other", name), row(2, "Button", "删除")]
+        };
+        let mut old = vec![row(0, "Application", "备忘录")];
+        old.extend(section("A"));
+        old.extend((0..4).map(|i| row(1, "StaticText", &format!("行 {i}"))));
+        // A second 删除 appears in another section: ancestry tells them apart.
+        let mut new = old.clone();
+        new.extend(section("B"));
+        assert_eq!(rebind_snapshot_row(&old, 2, &new), RowRebind::Index(2));
+
+        // A second 删除 in the SAME section: nothing tells them apart.
+        let mut twin = old.clone();
+        twin.insert(3, row(2, "Button", "删除"));
+        assert_eq!(rebind_snapshot_row(&old, 2, &twin), RowRebind::Ambiguous);
+    }
+
+    #[test]
+    fn rows_without_a_durable_identity_never_rebind() {
+        let mut old = settings();
+        old.push(row(2, "Other", ""));
+        old.push(with_value(row(2, "TextField", "你好"), "你好"));
+        let mut new = old.clone();
+        new[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&old, 9, &new), RowRebind::Stale);
+        assert_eq!(rebind_snapshot_row(&old, 10, &new), RowRebind::Stale);
+
+        // The same text field with an identifier is recognizable whatever it holds.
+        let mut field = with_value(row(2, "TextField", "你好"), "你好");
+        field.identifier = Some("message".into());
+        old[10] = field.clone();
+        new[10] = ElementRow { label: "你好吗".into(), value: Some("你好吗".into()), ..field };
+        assert_eq!(rebind_snapshot_row(&old, 10, &new), RowRebind::Index(10));
+    }
 }
