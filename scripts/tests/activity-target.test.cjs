@@ -85,10 +85,8 @@ test('element target outlines use runner viewport, and feedback expires', () => 
   assert.ok(nodes.every(node => node.removed));
 });
 
-test('skips stale, non-click, offline, rotated and unmappable feedback', () => {
+test('skips non-click, offline, rotated and unmappable feedback', () => {
   const { ctx, nodes, frame } = panel();
-  ctx.showAgentActivityTarget({ ...item(normalized), at_ms: 1 });
-  ctx.showAgentActivityTarget({ ...item(normalized), at_ms: 20000 });
   ctx.showAgentActivityTarget({ ...item(normalized), action_type: 'set_value' });
   ctx.showAgentActivityTarget(item({ coordinate_space: 'runner_points', point: [25, 50] }));
   ctx.showAgentActivityTarget(item({ coordinate_space: 'runner_points', point: [25, 50], viewport: [200, 100] }));
@@ -132,6 +130,29 @@ test('historical item geometry is never replayed without live_target', async () 
   let feed={next:1,items:[]};ctx.fetch=async()=>({ok:true,json:async()=>feed});
   await ctx.pollAgentActivity();
   feed={next:2,items:[{...item(normalized),seq:2}]};
+  await ctx.pollAgentActivity();
+  assert.equal(nodes.length,0);
+});
+
+
+test('server-vetted live feedback tolerates sender clock skew', async () => {
+  const {ctx,nodes}=panel();let feed={next:1,items:[]};
+  ctx.fetch=async()=>({ok:true,json:async()=>feed});await ctx.pollAgentActivity();
+  for (const [seq,at_ms] of [[2,1],[3,999999999]]) {
+    const live={...item(normalized),seq,at_ms};feed={next:seq,items:[live],live_target:live};
+    await ctx.pollAgentActivity();
+  }
+  assert.equal(nodes.length,2);
+});
+
+test('tab hidden while live feedback is in flight draws no pointer', async () => {
+  const {ctx,nodes}=panel();let feed={next:1,items:[]};
+  ctx.fetch=async()=>({ok:true,json:async()=>feed});await ctx.pollAgentActivity();
+  const live={...item(normalized),seq:2};
+  ctx.fetch=async()=>({ok:true,json:async()=>{
+    ctx.document.visibilityState='hidden';
+    return {next:2,items:[live],live_target:live};
+  }});
   await ctx.pollAgentActivity();
   assert.equal(nodes.length,0);
 });

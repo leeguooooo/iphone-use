@@ -24,7 +24,12 @@ enum RunnerElementTypes { static func rawValue(of name: String) -> Int { 1 } }
 '''
 program += block((BASE / 'RunnerHTTP.swift').read_text(), 'struct RunnerError: Error') + '\n'
 program += block(elements, 'final class UINode {') + '\n'
-program += block(elements, 'enum ElementFrameStability {') + '\n'
+# Inject only clock/wait dependencies: exercise the production sampling state
+# machine without assuming the CI scheduler can run four AX reads in 200 ms.
+clocked = block(elements, 'enum ElementFrameStability {')
+clock_default = 'now: () -> Double = { ProcessInfo.processInfo.systemUptime }'
+assert clock_default in clocked
+program += 'var syntheticTime = 0.0\n' + clocked.replace(clock_default, 'now: () -> Double = { syntheticTime }') + '\n'
 program += block((BASE / 'RunnerActions.swift').read_text(), 'enum TapBounds {') + '\n'
 program += r'''
 struct HTTPRequest { var query: [String:String] = [:] }
@@ -89,7 +94,12 @@ final class Probe {
   }
 '''
 for name in ['liveElement', 'elementSubtree', 'observeElement', 'editableEvidence', 'elementEvidence', 'actionNode', 'revealElement', 'clickElement']:
-    program += block(routes, '  private func ' + name + '(').replace('private func', 'func', 1) + '\n'
+    method = block(routes, '  private func ' + name + '(').replace('private func', 'func', 1)
+    if name == 'observeElement':
+        real_wait = 'RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.025))'
+        assert real_wait in method
+        method = method.replace(real_wait, 'syntheticTime += 0.025')
+    program += method + '\n'
 program += r'''
 }
 var checks = 0
@@ -103,6 +113,7 @@ func refused(_ code: Int, _ action: () throws -> Void) {
   catch { require(false,"unexpected error \(error)") }
 }
 func probe(_ target: UINode = node()) -> Probe {
+  syntheticTime = 0
   IPURBridge.editable = nil; IPURBridge.fail = false; IPURBridge.calls = []; IPURBridge.pid = 42
   let p = Probe(); p.elements.stored = target; return p
 }

@@ -645,9 +645,14 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
     if outcome.is_ok() {
         let before = previous.as_ref().filter(|o| now.saturating_duration_since(o.last_seen) < lease).map(|o| &o.name);
         let after = slot.as_ref().map(|o| &o.name);
-        if before != after || (previous.is_some() && slot.is_none()) {
+        let access_changed=before != after;
+        if access_changed {
             state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             crate::activity::clear_live();
+        }
+        // Removing an already-lapsed slot does not revoke owner-less reads
+        // started after expiry. It still must release that slot's old trace.
+        if access_changed || (previous.is_some() && slot.is_none()) {
             if let Some(previous) = previous.as_ref() { traces.end_owner(&previous.name); }
         }
     }
@@ -5734,10 +5739,10 @@ async fn agent_activity(
     let mut response=json_response(StatusCode::OK,body);
     response.headers_mut().insert(header::CACHE_CONTROL,header::HeaderValue::from_static("no-store"));
     if query.live {
-        response.extensions_mut().insert(ValueReadFence {state,scope,max_bytes:ADVICE_MAX_BODY,
+        response.extensions_mut().insert(ValueReadFence {state:state.clone(),scope:scope.clone(),max_bytes:ADVICE_MAX_BODY,
             failure:serde_json::json!({"ok":false,"error":"activity_scope_changed"})});
     }
-    response
+    finish_private_read(&state,scope.privacy_epoch,response)
 }
 
 /// `POST /agent/run` — mark a run boundary for the caller (`X-Phone-Owner`):
@@ -22505,6 +22510,17 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 #[cfg(test)]
 mod tests {
     #[test]
+    fn history_activity_is_fenced_against_late_private_hold() {
+        use tower::ServiceExt;
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let state=fixture_app_state(None);
+            let response=router(state.clone()).oneshot(axum::http::Request::builder().uri("/agent/activity?live=false").body(Body::empty()).unwrap()).await.unwrap();
+            state.privacy_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+            assert!(axum::body::to_bytes(response.into_body(),ADVICE_MAX_BODY).await.is_err());
+        });
+    }
+
+    #[test]
     fn rebound_notice_preserves_the_value_verification_receipt() {
         let mut runner=crate::runner::RunnerClient::new("http://127.0.0.1:9").unwrap();
         runner.rebound_row=Some((1,2));
@@ -22539,12 +22555,14 @@ mod tests {
             let owner=match mode {0=>"released-owner",1=>"expired-owner",_=>"expired-anonymous-owner"};
             *state.owner.lock().unwrap()=Some(PhoneOwner{name:owner.into(),last_seen:if expired {Instant::now()-std::time::Duration::from_secs(state.owner_lease_secs+1)} else {Instant::now()}});
             assert!(state.action_traces.lock().unwrap().start(owner,"run"));
+            let epoch=state.owner_epoch.load(std::sync::atomic::Ordering::Acquire);
             if expired {
                 let mut headers=HeaderMap::new();
                 if mode==1 {headers.insert("x-phone-owner","new-owner".parse().unwrap());}
                 assert!(claim_phone_owner(&state,&headers).is_ok());
             } else { state.release_owner_lease(); }
             assert_eq!(state.action_traces.lock().unwrap().export(owner,"run").unwrap()["active"],false);
+            if mode==2 {assert_eq!(state.owner_epoch.load(std::sync::atomic::Ordering::Acquire),epoch);}
         }
     }
 

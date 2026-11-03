@@ -6151,8 +6151,9 @@ function activityNormalizedTarget(target) {
 function showAgentActivityTarget(item) {
   if (!['tap', 'tap_locator', 'longpress'].includes(item.action_type)) return;
   // No replay of a hidden tab's old actions, or a disconnected device's feed.
-  const age = Date.now() - item.at_ms;
-  if (!Number.isFinite(age) || age < -2000 || age > AGENT_ACTIVITY_SHOW_MS || overlayState !== 'hidden') return;
+  // Freshness comes from the server's monotonic TTL and the poll seq guard,
+  // not from comparing two machines' wall clocks.
+  if (document.visibilityState !== 'visible' || overlayState !== 'hidden') return;
   const target = activityNormalizedTarget(item.target);
   const content = visibleFrameContentRect();
   if (!target || !content) return;
