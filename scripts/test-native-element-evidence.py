@@ -25,6 +25,7 @@ enum RunnerElementTypes { static func rawValue(of name: String) -> Int { 1 } }
 program += block((BASE / 'RunnerHTTP.swift').read_text(), 'struct RunnerError: Error') + '\n'
 program += block(elements, 'final class UINode {') + '\n'
 program += block(elements, 'enum ElementFrameStability {') + '\n'
+program += block((BASE / 'RunnerActions.swift').read_text(), 'enum TapBounds {') + '\n'
 program += r'''
 struct HTTPRequest { var query: [String:String] = [:] }
 struct HTTPResponse {
@@ -72,6 +73,8 @@ final class Probe {
   var mutations = 0
   var reveals = 0
   func scrollIntoView(_ id: String) throws { reveals += 1 }
+  func windowSizePoints() -> CGSize { CGSize(width:390,height:844) }
+  func tapPoint(_ point: CGPoint) throws { mutations += 1 }
   func freshNode(_ id: String) throws -> UINode {
     reads += 1
     return sequence.isEmpty ? elements.stored! : sequence.removeFirst()
@@ -85,7 +88,7 @@ final class Probe {
     mutations += 1
   }
 '''
-for name in ['liveElement', 'elementSubtree', 'observeElement', 'editableEvidence', 'elementEvidence', 'actionNode', 'revealElement']:
+for name in ['liveElement', 'elementSubtree', 'observeElement', 'editableEvidence', 'elementEvidence', 'actionNode', 'revealElement', 'clickElement']:
     program += block(routes, '  private func ' + name + '(').replace('private func', 'func', 1) + '\n'
 program += r'''
 }
@@ -111,6 +114,8 @@ for disabled in [false,"0",NSNumber(value:false)] {
   let p = probe(node(enabled:disabled))
   refused(400) { try p.attempt() }
   require(p.mutations == 0,"disabled target mutated")
+  refused(400) { _ = try p.clickElement("E") }
+  require(p.mutations == 0 && p.reveals == 0,"clickElement bypassed disabled target gate")
 }
 for editable in [false,"false"] {
   let p = probe(node(editable:editable))

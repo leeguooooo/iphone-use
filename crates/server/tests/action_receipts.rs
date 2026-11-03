@@ -184,10 +184,11 @@ fn trace_export_requires_the_configured_credentials() {
 
 #[test]
 fn subtree_route_reads_the_selected_native_scope_and_keeps_screen_refs() {
-    block(async {
-        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
-        let observed = calls.clone();
-        let mock = axum::Router::new().fallback(move |request: axum::extract::Request| {
+    for ambiguous in [false, true] {
+        block(async {
+            let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+            let observed = calls.clone();
+            let mock = axum::Router::new().fallback(move |request: axum::extract::Request| {
             let calls = observed.clone();
             async move {
                 let path = request.uri().path().to_string();
@@ -195,7 +196,7 @@ fn subtree_route_reads_the_selected_native_scope_and_keeps_screen_refs() {
                 let (value, truncated) = match path.as_str() {
                     "/session" => (serde_json::json!({"sessionId":"S","capabilities":{"ipu:elementSubtree":true}}), false),
                     "/session/S/appium/settings" => (serde_json::Value::Null, false),
-                    "/session/S/elements" => (serde_json::json!([{"ELEMENT":"ROOT"}]), false),
+                    "/session/S/elements" => (if ambiguous {serde_json::json!([{"ELEMENT":"ROOT"},{"ELEMENT":"TWIN"}])} else {serde_json::json!([{"ELEMENT":"ROOT"}])}, false),
                     "/session/S/element/ROOT/ipu/subtree" => (serde_json::json!({"type":"XCUIElementTypeCell","label":"Section","children":[{"type":"XCUIElementTypeButton","label":"Inside"}]}), true),
                     _ => panic!("unexpected subtree runner request: {path}"),
                 };
@@ -205,45 +206,56 @@ fn subtree_route_reads_the_selected_native_scope_and_keeps_screen_refs() {
                 ))
             }
         });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            axum::serve(listener, mock).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, mock).await.unwrap();
+            });
+            let mut state = fixture_app_state(None);
+            Arc::get_mut(&mut state).unwrap().runner = Some(Arc::new(tokio::sync::Mutex::new(
+                srv::runner::RunnerClient::new(base).unwrap(),
+            )));
+            state.element_snapshots.lock().unwrap().push_back((
+                "cached-screen".into(),
+                Arc::new(vec![srv::runner::ElementRow {
+                    kind: "Cell".into(),
+                    label: "Section".into(),
+                    ..Default::default()
+                }]),
+            ));
+            let (status, body) = request(
+                srv::http::router(state.clone()),
+                "/agent/subtree",
+                "subtree-route",
+                Some(serde_json::json!({"snapshot":"cached-screen","element":0})),
+            )
+            .await;
+            task.abort();
+            if ambiguous {
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(body["error"], "subtree_read_failed");
+                assert!(!calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path.contains("/ipu/subtree")));
+                return;
+            }
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["action_refs"], false);
+            assert_eq!(body["complete"], false);
+            assert_eq!(body["coverage"], "partial");
+            assert!(body.get("snapshot").is_none());
+            assert_eq!(state.element_snapshots.lock().unwrap().len(), 1);
+            assert_eq!(
+                *calls.lock().unwrap(),
+                vec![
+                    "/session",
+                    "/session/S/appium/settings",
+                    "/session/S/elements",
+                    "/session/S/element/ROOT/ipu/subtree"
+                ]
+            );
         });
-        let mut state = fixture_app_state(None);
-        Arc::get_mut(&mut state).unwrap().runner = Some(Arc::new(tokio::sync::Mutex::new(
-            srv::runner::RunnerClient::new(base).unwrap(),
-        )));
-        state.element_snapshots.lock().unwrap().push_back((
-            "cached-screen".into(),
-            Arc::new(vec![srv::runner::ElementRow {
-                kind: "Cell".into(),
-                label: "Section".into(),
-                ..Default::default()
-            }]),
-        ));
-        let (status, body) = request(
-            srv::http::router(state.clone()),
-            "/agent/subtree",
-            "subtree-route",
-            Some(serde_json::json!({"snapshot":"cached-screen","element":0})),
-        )
-        .await;
-        task.abort();
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["action_refs"], false);
-        assert_eq!(body["complete"], false);
-        assert_eq!(body["coverage"], "partial");
-        assert!(body.get("snapshot").is_none());
-        assert_eq!(state.element_snapshots.lock().unwrap().len(), 1);
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec![
-                "/session",
-                "/session/S/appium/settings",
-                "/session/S/elements",
-                "/session/S/element/ROOT/ipu/subtree"
-            ]
-        );
-    });
+    }
 }

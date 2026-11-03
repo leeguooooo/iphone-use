@@ -167,7 +167,7 @@ fn mock_runner_inner(
             stream
                 .set_read_timeout(Some(std::time::Duration::from_millis(500)))
                 .unwrap();
-            let request = match read_mock_request(&mut stream) {
+            let request = match read_mock_request_until(&mut stream, || thread_stop.load(std::sync::atomic::Ordering::Acquire)) {
                 Ok(Some(request)) => request,
                 _ => continue,
             };

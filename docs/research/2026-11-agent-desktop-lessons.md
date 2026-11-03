@@ -14,7 +14,7 @@
 |---|---|
 | 2. 送达与验证 | `action_evidence` 分开报告；set_value 精确读回、终态 wait_for 才能标验证；已有 observed alert 接口继续使用 |
 | 3. 结构化恢复 | 错误附 `recovery.action` 固定策略；不确定或部分送达不建议重试 |
-| 4. 点击展示 | activity 结构化目标；面板绿色涟漪/描边，区分坐标空间 |
+| 4. 点击展示 | activity 结构化非敏感语义目标；面板绿色涟漪/描边，不留存任意点击点或输入键 |
 | 5. 派发前检查 | runner 对单元素 enabled/editable/frame 作有界检查；保留未知状态 |
 | 6. 子树读取 | `/agent/subtree` / `phone_subtree`，native AX 子树，带覆盖范围；返回只读局部行，不生成动作编号 |
 | 7. 动作轨迹 | run start `trace:true`，按 owner 隔离的脱敏内存轨迹，JSON/JSONL 导出；不含截图，不自动重放 |

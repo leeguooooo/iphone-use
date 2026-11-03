@@ -1677,15 +1677,15 @@ or editable state.
 
 ### Watching and inspecting a run
 
-The control panel shows agent targets in green: a ripple and, when available,
+The control panel shows nonsensitive named element targets in green: a ripple and, when available,
 an outline. Element geometry is a snapshot's rectangle centre, not proof of the
 actual dispatched hit point. Runner-point targets are drawn only with a known
-runner viewport. Unresolved, stale and historical targets are not animated.
+runner viewport. Unresolved, stale and historical targets are not animated. Arbitrary coordinate taps, keypad keys and input fields have no point/rect in the activity history; exact keypad tap sequences must not be retained.
 
 `POST /agent/run {"action":"start","run_id":"task-1","trace":true}`
 (or `phone_run_start(trace=true)`) opts into a redacted action timeline. This
 `trace` option is independent of `complete_trace`, which counts model turns.
-End with the usual run end. Read it with
+End with the usual run end. Lease release, expiry/reclaim or takeover ends the prior owner's active trace while preserving export; start a fresh run ID to trace again. Read it with
 `GET /agent/trace?run_id=task-1` (`phone_run_trace`), or add `format=jsonl` for
 newline-delimited JSON export. Export requires the same authenticated owner.
 

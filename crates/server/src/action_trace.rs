@@ -1,14 +1,14 @@
 //! Opt-in, metadata-only diagnostic timelines. Never a replay source.
 //!
 //! The HTTP/MCP owner calls `start` ONLY for an explicit run `trace:true`,
-//! using authenticated owner and opaque run IDs, never caller-supplied identity.
+//! using the authenticated caller's owner namespace and opaque run IDs.
 //! Keep this store on AppState in an Arc<Mutex<TraceStore>>; hold the lock across
 //! each operation. At completion, recheck the original action's privacy AND
 //! authorization scope and pass `private_flag=true` if either is invalid.
 //! Capture `active_handle` when work starts, then call `record_for` on completion
 //! to fence late responses against their original run incarnation. `record` is
 //! a compatibility helper for immediate records, not delayed request completion.
-//! Call `end` on revocation/run end so later actions cannot join that trace.
+//! Call `end` on owner revocation/run end so later actions cannot join that trace.
 //! No scope checks or transport wiring are implemented here.
 //!
 //! Only bounded memory is retained: 16 runs, 200 events/run, 128-byte IDs.
@@ -120,6 +120,17 @@ impl TraceStore {
             .runs
             .iter_mut()
             .find(|r| r.owner == owner && r.id == run_id)
+        {
+            run.active = false;
+        }
+    }
+
+    /// Access revocation ends the active trace without discarding its history.
+    pub fn end_owner(&mut self, owner: &str) {
+        for run in self
+            .runs
+            .iter_mut()
+            .filter(|run| run.owner == owner && run.active)
         {
             run.active = false;
         }
@@ -238,6 +249,7 @@ enum ActionKind {
     TapLocator,
     Perform,
     Scroll,
+    Shortcut,
     WaitFor,
     Pause,
     Unknown,
@@ -262,6 +274,7 @@ impl ActionKind {
             Some("tap_locator") => Self::TapLocator,
             Some("perform") => Self::Perform,
             Some("scroll") => Self::Scroll,
+            Some("shortcut") => Self::Shortcut,
             Some("wait_for") => Self::WaitFor,
             Some("pause") => Self::Pause,
             None if value.get("type").is_none() => {
@@ -294,6 +307,7 @@ impl ActionKind {
             Self::TapLocator => "tap_locator",
             Self::Perform => "perform",
             Self::Scroll => "scroll",
+            Self::Shortcut => "shortcut",
             Self::WaitFor => "wait_for",
             Self::Pause => "pause",
             Self::Unknown => "unknown",
@@ -565,6 +579,17 @@ mod tests {
             12,
             false,
         );
+    }
+
+    #[test]
+    fn shortcuts_are_recognized_without_retaining_arbitrary_names() {
+        assert_eq!(
+            redact_action(&json!({"type":"shortcut","name":"SECRET"}))["kind"],
+            "shortcut"
+        );
+        assert!(!redact_action(&json!({"type":"shortcut","name":"SECRET"}))
+            .to_string()
+            .contains("SECRET"));
     }
 
     #[test]

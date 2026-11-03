@@ -638,15 +638,20 @@ fn claim_phone_owner(state: &AppState, headers: &HeaderMap) -> Result<bool, Resp
     let claim = owner_claim_from_headers(headers)?;
     let lease = std::time::Duration::from_secs(state.owner_lease_secs);
     let now = Instant::now();
+    let mut traces = recover(state.action_traces.lock());
     let mut slot = recover(state.owner.lock());
     let previous = slot.clone();
     let outcome = arbitrate_owner(&mut slot, claim, now, lease);
     if outcome.is_ok() {
         let before = previous.as_ref().filter(|o| now.saturating_duration_since(o.last_seen) < lease).map(|o| &o.name);
         let after = slot.as_ref().map(|o| &o.name);
-        if before != after { state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel); }
+        if before != after {
+            state.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            if let Some(previous) = previous.as_ref() { traces.end_owner(&previous.name); }
+        }
     }
     drop(slot);
+    drop(traces);
     match outcome {
         Ok(()) => {
             if let (OwnerClaim::Takeover(name), Some(prev)) = (claim, previous.as_ref()) {
@@ -797,8 +802,9 @@ pub type ElementSnapshotCache =
 
 impl AppState {
     fn release_owner_lease(&self) {
+        let mut traces = recover(self.action_traces.lock());
         let mut owner = recover(self.owner.lock());
-        *owner = None;
+        if let Some(previous) = owner.take() { traces.end_owner(&previous.name); }
         self.owner_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
@@ -5854,7 +5860,12 @@ fn record_action_trace(
     let current_owner = owner_lease.as_ref()
         .filter(|lease| now.saturating_duration_since(lease.last_seen) < std::time::Duration::from_secs(state.owner_lease_secs))
         .map(|lease| lease.name.as_str());
-    let private = private_until.is_some_and(|until| until > now)
+    // Install/uninstall ACKs may have no runner delivery receipt. Unless a
+    // refusal proves otherwise, unknown delivery still needs the current owner.
+    let dispatched = result["error"] != "phone_owned"
+        && result.pointer("/action_evidence/delivery/status").and_then(serde_json::Value::as_str) != Some("not_sent");
+    let private = (dispatched && current_owner != Some(owner.as_str()))
+        || private_until.is_some_and(|until| until > now)
         || generation != state.privacy_epoch.load(std::sync::atomic::Ordering::Acquire)
         || observation_scope.is_some_and(|scope| {
             scope.epoch != state.owner_epoch.load(std::sync::atomic::Ordering::Acquire)
@@ -12385,9 +12396,11 @@ fn disappearance_observed(
                 *seen |= row.get("seen").and_then(serde_json::Value::as_bool) == Some(true);
             }
         }
-    } else if let Some(indices) = observation.get("violated_absent").and_then(serde_json::Value::as_array) {
-        for index in indices.iter().filter_map(serde_json::Value::as_u64) {
-            if let Some(seen) = seen.get_mut(index as usize) { *seen = true; }
+    } else if observation.get("application_matches").and_then(serde_json::Value::as_bool) == Some(true) {
+        if let Some(indices) = observation.get("violated_absent").and_then(serde_json::Value::as_array) {
+            for index in indices.iter().filter_map(serde_json::Value::as_u64) {
+                if let Some(seen) = seen.get_mut(index as usize) { *seen = true; }
+            }
         }
     }
     let unseen: Vec<_> = seen.iter().enumerate().filter_map(|(i, seen)| (!seen).then_some(i)).collect();
@@ -13362,7 +13375,7 @@ async fn agent_actions_scoped(
                     .await;
                 }
                 applied_actions += 1;
-                record_activity(&state, &headers, action);
+                record_activity(&state, &headers, action, w.cached_window_size());
                 let mut receipt = serde_json::json!({
                     "index": index,
                     "kind": "action",
@@ -16396,13 +16409,15 @@ fn record_flow_action(state: &AppState, action: &serde_json::Value, now: Instant
 }
 
 /// One applied action on the activity feed, in plain words (`crate::activity`).
-fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value) {
+fn record_activity(state: &AppState, headers: &HeaderMap, action: &serde_json::Value, viewport: Option<(f64,f64)>) {
     let rows = action
         .get("snapshot")
         .and_then(serde_json::Value::as_str)
         .and_then(|snapshot| lookup_element_snapshot(state, snapshot));
     let mut line = crate::activity::describe(action, rows.as_deref().map(Vec::as_slice));
-    if let Some(root) = rows.as_ref().and_then(|rows| rows.iter().find(|row| row.kind == "Application")) {
+    let viewport = viewport.or_else(|| state.runner.as_ref()?.try_lock().ok()?.cached_window_size());
+    if let Some((width,height)) = viewport { line = line.with_runner_viewport(width,height); }
+    else if let Some(root) = rows.as_ref().and_then(|rows| rows.iter().find(|row| row.kind == "Application")) {
         if root.rect[0] == 0.0 && root.rect[1] == 0.0 {
             line = line.with_runner_viewport(root.rect[2], root.rect[3]);
         }
@@ -16417,7 +16432,7 @@ fn flow_after_input(
     headers: &HeaderMap,
     action: &serde_json::Value,
 ) -> Vec<(&'static str, serde_json::Value)> {
-    record_activity(state, headers, action);
+    record_activity(state, headers, action, None);
     if headers.contains_key(FLOW_RUN_HEADER) {
         return Vec::new();
     }
@@ -22456,6 +22471,41 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lease_release_and_expiry_end_the_previous_owners_trace() {
+        let state=fixture_app_state(None);
+        for expired in [false,true] {
+            let owner=if expired {"expired-owner"} else {"released-owner"};
+            *state.owner.lock().unwrap()=Some(PhoneOwner{name:owner.into(),last_seen:if expired {Instant::now()-std::time::Duration::from_secs(state.owner_lease_secs+1)} else {Instant::now()}});
+            assert!(state.action_traces.lock().unwrap().start(owner,"run"));
+            if expired {
+                let mut headers=HeaderMap::new();headers.insert("x-phone-owner","new-owner".parse().unwrap());
+                assert!(claim_phone_owner(&state,&headers).is_ok());
+            } else { state.release_owner_lease(); }
+            assert_eq!(state.action_traces.lock().unwrap().export(owner,"run").unwrap()["active"],false);
+        }
+    }
+
+    #[test]
+    fn scope_less_delivered_install_cannot_cross_an_owner_change() {
+        let state=fixture_app_state(None);
+        let mut headers=HeaderMap::new();headers.insert("x-phone-owner","install-owner".parse().unwrap());
+        state.action_traces.lock().unwrap().start("install-owner","run");
+        let handle=state.action_traces.lock().unwrap().active_handle("install-owner").unwrap();
+        *state.owner.lock().unwrap()=Some(PhoneOwner{name:"other-owner".into(),last_seen:Instant::now()});
+        for mut result in [
+            serde_json::json!({"ok":true,"installed":true}),
+            serde_json::json!({"ok":false,"error":"outcome_unknown","outcome":"unknown"}),
+            serde_json::json!({"ok":false,"error":"phone_owned","owner":"other-owner"}),
+        ] {
+            crate::action_feedback::enrich(&mut result);
+            record_action_trace(&state,&headers,&serde_json::json!({"type":"install"}),Some(&handle),0,None,&result);
+        }
+        let trace=state.action_traces.lock().unwrap().export("install-owner","run").unwrap();
+        assert_eq!(trace["events"].as_array().unwrap().len(),1);
+        assert_eq!(trace["events"][0]["result"]["ok"],false);
+    }
+
     #[test]
     fn unknown_candidate_state_cannot_prove_a_locator_unique() {
         use crate::runner::ElementRow;
@@ -30775,6 +30825,20 @@ mod snapshot_rebind_tests {
 mod disappearance_tests {
     use super::*;
     #[test]
+    fn another_application_cannot_satisfy_appearance_history() {
+        let expect:AgentUiExpectation=serde_json::from_value(serde_json::json!({"application":"Wanted","absent":[{"label":"Loading"}],"absent_after_present":true})).unwrap();
+        let mut seen=vec![false];
+        let mut other=serde_json::json!({"application_matches":false,"violated_absent":[0]});
+        assert!(!disappearance_observed(&expect,&mut seen,&mut other));
+        assert_eq!(seen,vec![false]);
+        let mut absent=serde_json::json!({"application_matches":true,"violated_absent":[]});
+        assert!(!disappearance_observed(&expect,&mut seen,&mut absent));
+        let mut present=serde_json::json!({"application_matches":true,"violated_absent":[0]});
+        assert!(disappearance_observed(&expect,&mut seen,&mut present));
+        assert!(disappearance_observed(&expect,&mut seen,&mut absent));
+    }
+
+    #[test]
     fn formatted_values_do_not_claim_exact_readback() {
         for (actual, expected) in [("-15", "15"), ("1/2", "12")] {
             let mut detail = None;
@@ -30791,10 +30855,10 @@ mod disappearance_tests {
             "absent":[{"label":"Loading"}],"absent_after_present":true
         })).unwrap();
         let mut seen = vec![false];
-        let mut absent = serde_json::json!({"violated_absent":[],"read":true});
+        let mut absent = serde_json::json!({"violated_absent":[],"read":true,"application_matches":true});
         assert!(!disappearance_observed(&expect, &mut seen, &mut absent));
         assert_eq!(absent["unseen_absent"], serde_json::json!([0]));
-        let mut present = serde_json::json!({"violated_absent":[0],"read":true});
+        let mut present = serde_json::json!({"violated_absent":[0],"read":true,"application_matches":true});
         assert!(disappearance_observed(&expect, &mut seen, &mut present));
         assert!(disappearance_observed(&expect, &mut seen, &mut absent));
     }

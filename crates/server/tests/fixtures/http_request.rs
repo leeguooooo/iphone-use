@@ -1,11 +1,21 @@
 // Read a complete HTTP fixture request before closing the connection.
 // A header-only read can reset an in-flight JSON body and change delivery evidence.
 fn read_mock_request(reader: &mut impl Read) -> std::io::Result<Option<String>> {
+    read_mock_request_until(reader, || false)
+}
+
+fn read_mock_request_until(
+    reader: &mut impl Read,
+    stopped: impl Fn() -> bool,
+) -> std::io::Result<Option<String>> {
     use std::io::{Error, ErrorKind};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut bytes = Vec::new();
     let mut expected = None;
     loop {
+        if stopped() {
+            return Err(ErrorKind::Interrupted.into());
+        }
         if std::time::Instant::now() >= deadline {
             return Err(ErrorKind::TimedOut.into());
         }

@@ -27,6 +27,7 @@ fn bounded_move_duration_ms(duration_ms: u64) -> u64 {
 /// *entire* observation vanish — a reachable runner then reported `runner:false`
 /// for the whole reconnect and setup-runner.sh's hand-off verdict failed on it.
 const ACTIONABILITY_PROBE_BUDGET: Duration = Duration::from_secs(10);
+const WINDOW_SIZE_TTL: Duration = Duration::from_secs(30);
 
 /// Budget for the session-less `GET /wda/locked` that precedes session
 /// creation in `probe_health`. It is a plain in-process read on the runner.
@@ -1968,14 +1969,17 @@ impl RunnerClient {
         Ok(())
     }
 
-    /// Window (screen) size in runner points — needed to map our normalized
-    /// `[0,1]` agent coordinates onto [`Self::tap_point`]'s absolute points.
+    /// Authoritative cached runner dimensions, without a network request.
+    pub fn cached_window_size(&self) -> Option<(f64, f64)> {
+        self.window.filter(|(_, at)| at.elapsed() < WINDOW_SIZE_TTL).map(|(size, _)| size)
+    }
+
+    /// Window size in runner points for mapping normalized coordinates.
     pub async fn window_size(&mut self) -> Result<(f64, f64)> {
         // Every tree read refreshes this from the Application frame (see
         // `elements`), so the TTL only matters between reads; a rotation shows
         // up in the next read. Measured on real sessions: the 3 s TTL re-read
         // the size on almost every request (~0.24 s each, 6.8 % of runner time).
-        const WINDOW_SIZE_TTL: Duration = Duration::from_secs(30);
         if let Some((size, at)) = self.window {
             if at.elapsed() < WINDOW_SIZE_TTL {
                 return Ok(size);
@@ -4200,6 +4204,14 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn unlabeled_app_root_still_supplies_cached_viewport() {
+        let mut client=RunnerClient::new("http://127.0.0.1:9").unwrap();
+        let rows=client.rows_from_tree(&serde_json::json!({"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},"children":[{"type":"XCUIElementTypeButton","label":"Done"}]}), false);
+        assert!(!rows.iter().any(|row|row.kind=="Application"));
+        assert_eq!(client.cached_window_size(),Some((440.0,956.0)));
+    }
 
     #[test]
     fn element_reads_require_explicit_session_capabilities() {

@@ -99,7 +99,6 @@ struct Target {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CoordinateSpace {
-    Normalized,
     RunnerPoints,
 }
 
@@ -129,9 +128,7 @@ impl Line {
     pub fn with_runner_viewport(mut self, width: f64, height: f64) -> Self {
         if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
             if let Some(target) = &mut self.target {
-                if target.coordinate_space == CoordinateSpace::RunnerPoints {
-                    target.viewport = Some([width, height]);
-                }
+                target.viewport = Some([width, height]);
             }
         }
         self
@@ -149,6 +146,21 @@ fn line(en: impl Into<String>, zh: impl Into<String>) -> Line {
 
 /// What an action touched, in both languages: an element of `rows` (its
 /// label, identifier or kind), a label, a locator, or a point.
+fn key_label(label: &str) -> bool {
+    let label = label.trim();
+    !label.is_empty() && (label.chars().count() == 1 || label.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn sensitive_input(row: &ElementRow) -> bool {
+    let kind = row.kind.to_ascii_lowercase();
+    kind.contains("textfield")
+        || kind.contains("searchfield")
+        || kind.contains("textview")
+        || kind.contains("securetext")
+        || kind == "key"
+        || key_label(&row.label)
+}
+
 fn target(action: &Value, rows: Option<&[ElementRow]>) -> Line {
     let element = action.get("element");
     if let Some(row) = element
@@ -157,19 +169,15 @@ fn target(action: &Value, rows: Option<&[ElementRow]>) -> Line {
     {
         // Some input providers repeat entered content as their label.
         if !row.label.trim().is_empty()
-            && !row.kind.to_ascii_lowercase().contains("textfield")
-            && !row.kind.to_ascii_lowercase().contains("textview")
-            && !row.kind.to_ascii_lowercase().contains("securetext")
+            && !sensitive_input(row)
             && row.value.as_deref() != Some(row.label.as_str())
         {
             let q = quoted(&row.label);
             return line(q.clone(), q);
         }
-        if let Some(id) = row
-            .identifier
-            .as_deref()
-            .filter(|s| !s.trim().is_empty() && row.value.as_deref() != Some(*s))
-        {
+        if let Some(id) = row.identifier.as_deref().filter(|s| {
+            !sensitive_input(row) && !s.trim().is_empty() && row.value.as_deref() != Some(*s)
+        }) {
             let q = quoted(id);
             return line(q.clone(), q);
         }
@@ -193,19 +201,13 @@ fn target(action: &Value, rows: Option<&[ElementRow]>) -> Line {
             .find_map(|k| locator.get(*k).and_then(Value::as_str))
     });
     if let Some(text) = text {
+        if key_label(text) {
+            return line("a keypad key", "一个按键");
+        }
         let q = quoted(text);
         return line(q.clone(), q);
     }
-    match (
-        action.get("x").and_then(Value::as_f64),
-        action.get("y").and_then(Value::as_f64),
-    ) {
-        (Some(x), Some(y)) => {
-            let point = format!("({}, {})", x.round(), y.round());
-            line(point.clone(), format!("坐标 {point}"))
-        }
-        _ => line("the screen", "屏幕"),
-    }
+    line("the screen", "屏幕")
 }
 
 /// The app name for a bundle id, from the catalog; the id when unknown.
@@ -266,6 +268,12 @@ fn click_target(action: &Value, rows: Option<&[ElementRow]>) -> Option<Target> {
         }
         let index = usize::try_from(element.as_u64()?).ok()?;
         let row = rows?.get(index)?;
+        if sensitive_input(row)
+            || row.label.trim().is_empty()
+            || row.value.as_deref() == Some(row.label.as_str())
+        {
+            return None;
+        }
         let [x, y, w, h] = row.rect;
         if !row.rect.iter().all(|v| v.is_finite())
             || x < 0.0
@@ -288,23 +296,8 @@ fn click_target(action: &Value, rows: Option<&[ElementRow]>) -> Option<Target> {
     if action.get("label").is_some() || action.get("locator").is_some() {
         return None;
     }
-    // The /agent/input tap and longpress contract explicitly uses [0,1].
-    // An out-of-range number is invalid, never evidence of runner points.
-    let x = action.get("x")?.as_f64()?;
-    let y = action.get("y")?.as_f64()?;
-    if ![x, y]
-        .iter()
-        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
-    {
-        return None;
-    }
-    Some(Target {
-        coordinate_space: CoordinateSpace::Normalized,
-        point: [x, y],
-        point_basis: "action_coordinates",
-        rect: None,
-        viewport: None,
-    })
+    // Arbitrary points can encode a PIN/password. They never enter history.
+    None
 }
 
 fn describe_words(action: &Value, rows: Option<&[ElementRow]>) -> Line {
@@ -476,10 +469,9 @@ mod tests {
     fn taps_name_the_element_the_snapshot_showed() {
         let rows = vec![row("Window", ""), row("Cell", "Wi-Fi")];
         let tap = json!({"type":"tap","element":1,"snapshot":"S1"});
-        assert_eq!(
-            describe_words(&tap, Some(&rows)),
-            line("Tapped “Wi-Fi”", "点按“Wi-Fi”")
-        );
+        let described = describe(&tap, Some(&rows));
+        assert_eq!(described.en, "Tapped “Wi-Fi”");
+        assert_eq!(described.zh, "点按“Wi-Fi”");
         assert_eq!(en(tap, None), "Tapped an element");
         assert_eq!(
             describe_words(&json!({"type":"tap","element":0}), Some(&rows)),
@@ -491,7 +483,7 @@ mod tests {
         );
         assert_eq!(
             describe_words(&json!({"type":"tap","x":100.4,"y":220.6}), None),
-            line("Tapped (100, 221)", "点按坐标 (100, 221)")
+            line("Tapped the screen", "点按屏幕")
         );
         assert_eq!(
             en(
@@ -528,19 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_clicks_keep_explicit_normalized_geometry() {
+    fn arbitrary_click_points_are_never_retained() {
         let item = wire(
             json!({"type":"tap","x":0.25,"y":0.75,"text":"SECRET"}),
             None,
         );
         assert_eq!(item["action_type"], "tap");
-        assert_eq!(
-            item["target"],
-            json!({
-                "coordinate_space":"normalized", "point":[0.25,0.75],
-                "point_basis":"action_coordinates",
-            })
-        );
+        assert!(item.get("target").is_none());
+        assert_eq!(item["text"], "Tapped the screen");
         assert!(!item.to_string().contains("SECRET"));
         for action in [
             json!({"type":"tap","x":25,"y":75}),
@@ -552,10 +539,9 @@ mod tests {
         ] {
             assert!(wire(action, None).get("target").is_none());
         }
-        assert_eq!(
-            wire(json!({"type":"longpress","x":0,"y":1}), None)["target"]["point"],
-            json!([0.0, 1.0])
-        );
+        assert!(wire(json!({"type":"longpress","x":0,"y":1}), None)
+            .get("target")
+            .is_none());
     }
 
     #[test]
@@ -635,6 +621,32 @@ mod tests {
         };
         assert!(entry_json(&entry).get("target").is_none());
         assert_eq!(entry_json(&entry)["owner"], "agent");
+    }
+
+    #[test]
+    fn input_identifiers_and_keypad_geometry_are_never_retained() {
+        for kind in ["TextField", "SecureTextField", "TextView", "SearchField"] {
+            let rows = vec![ElementRow {
+                identifier: Some("SECRET".into()),
+                rect: [10.0, 20.0, 40.0, 50.0],
+                ..row(kind, "SECRET")
+            }];
+            let value = wire(json!({"type":"tap","element":0}), Some(&rows));
+            assert!(!value.to_string().contains("SECRET"));
+            assert!(value.get("target").is_none());
+        }
+        for (kind, label) in [("Button", "7"), ("Key", "Q"), ("Button", "A")] {
+            let rows = vec![ElementRow {
+                rect: [10.0, 20.0, 40.0, 50.0],
+                ..row(kind, label)
+            }];
+            let value = wire(json!({"type":"tap","element":0}), Some(&rows));
+            assert!(value.get("target").is_none());
+            assert!(!value["text"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("“{label}”")));
+        }
     }
 
     #[test]

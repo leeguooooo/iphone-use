@@ -340,3 +340,6 @@ verification and include structured recovery strategies. `phone_run_start` with
 `phone_run_trace`; it contains no typed values or screenshots. These native
 checks and subtree reads require an updated runner. See the
 [agent reference](docs/agent-reference.md#action-evidence-and-recovery).
+
+Activity history omits arbitrary tap coordinates, input identifiers and keypad
+keys. Green agent feedback is limited to nonsensitive named element targets.

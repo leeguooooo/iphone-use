@@ -112,3 +112,15 @@ test('poll boot suppresses history, then draws only unseen actions', async () =>
   await ctx.pollAgentActivity();
   assert.equal(nodes.length, 1);
 });
+
+
+test('hidden tab draws no fresh agent feedback', async () => {
+  const { ctx, nodes } = panel();
+  let feed = { next: 1, items: [] };
+  ctx.fetch = async () => ({ ok: true, json: async () => feed });
+  await ctx.pollAgentActivity();
+  feed = { next: 2, items: [{ ...item({coordinate_space:'runner_points',point:[25,50],viewport:[100,200]}), seq: 2 }] };
+  ctx.document.visibilityState = 'hidden';
+  await ctx.pollAgentActivity();
+  assert.equal(nodes.length, 0);
+});

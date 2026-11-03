@@ -110,6 +110,27 @@ fn mock_request_reader_waits_for_fragmented_headers_and_utf8_body() {
     assert!(read_mock_request(&mut std::io::Cursor::new(b"GET / HTTP/1.1\r\n".to_vec())).is_err());
 }
 
+#[test]
+fn a_stopped_mock_aborts_an_open_partial_request() {
+    struct Partial { stopped: std::sync::Arc<std::sync::atomic::AtomicBool>, sent_header: bool }
+    impl Read for Partial {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.sent_header {
+                let partial=b"POST / HTTP/1.1\r\nContent-Length: 9\r\n\r\n{";
+                buffer[..partial.len()].copy_from_slice(partial);
+                self.sent_header=true;
+                return Ok(partial.len());
+            }
+            self.stopped.store(true, Ordering::Release);
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+    let stopped=Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut reader=Partial{stopped:stopped.clone(),sent_header:false};
+    let result=read_mock_request_until(&mut reader,||stopped.load(Ordering::Acquire));
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+}
+
 fn mock_runner_with_budget(
     budget: RequestBudget,
     responder: impl Fn(&str, usize) -> Option<(std::time::Duration, String)> + Send + 'static,
@@ -1099,7 +1120,7 @@ fn direct_browser_control_timeout_before_dispatch_is_retry_safe_408() {
         for (key, value) in legacy.as_object().unwrap() {
             assert_eq!(&json[key], value, "legacy field {key}");
         }
-        assert!(json["action_evidence"]["delivery"].is_object());
+        assert_eq!(json["action_evidence"]["delivery"]["status"], "not_sent");
     });
 }
 
@@ -1156,7 +1177,7 @@ fn direct_browser_control_timeout_after_dispatch_is_unknown_504() {
         for (key, value) in legacy.as_object().unwrap() {
             assert_eq!(&json[key], value, "legacy field {key}");
         }
-        assert!(json["action_evidence"]["delivery"].is_object());
+        assert_eq!(json["action_evidence"]["delivery"]["status"], "uncertain");
         assert_eq!(action_count.load(Ordering::SeqCst), 1);
     });
 }
