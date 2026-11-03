@@ -1591,6 +1591,107 @@ fn indexed_browser_tap_rejects_a_stale_snapshot_without_tapping() {
 }
 
 #[test]
+fn an_index_from_an_older_snapshot_still_taps_its_row_after_the_clock_ticks() {
+    block(async {
+        let source_count = Arc::new(AtomicUsize::new(0));
+        let observed_sources = source_count.clone();
+        let clicks = Arc::new(Mutex::new(Vec::new()));
+        let observed_clicks = clicks.clone();
+        let (base, _server) = mock_runner_at_most(40, move |request, _| {
+            let ok = |body: &str| Some((std::time::Duration::ZERO, body.to_string()));
+            if request.starts_with("POST /session ") {
+                ok(r#"{"value":{"sessionId":"SESSION"}}"#)
+            } else if request.contains("/source?format=json") {
+                // The first read is what the agent indexes; later reads show
+                // the same screen a minute on, with a row added above.
+                let clock = if observed_sources.fetch_add(1, Ordering::SeqCst) == 0 { "10:41" } else { "10:42" };
+                let extra = if clock == "10:41" { "" } else {
+                    r#"{"type":"XCUIElementTypeStaticText","label":"新消息","rect":{"x":20,"y":10,"width":80,"height":20},"children":[]},"#
+                };
+                ok(&format!(
+                    r#"{{"value":{{"type":"XCUIElementTypeApplication","label":"备忘录","children":[{extra}{{"type":"XCUIElementTypeStaticText","label":"{clock}","rect":{{"x":0,"y":0,"width":60,"height":20}},"children":[]}},{{"type":"XCUIElementTypeButton","label":"菜单","rect":{{"x":20,"y":40,"width":80,"height":44}},"children":[]}},{{"type":"XCUIElementTypeButton","label":"更多","rect":{{"x":20,"y":100,"width":80,"height":44}},"children":[]}},{{"type":"XCUIElementTypeButton","label":"新建","rect":{{"x":20,"y":160,"width":80,"height":44}},"children":[]}},{{"type":"XCUIElementTypeButton","label":"共享","rect":{{"x":20,"y":220,"width":80,"height":44}},"children":[]}}]}}}}"#
+                ))
+            } else if request.contains("/window/size") {
+                ok(r#"{"value":{"width":390,"height":844}}"#)
+            } else if request.contains("/alert/text") {
+                ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#)
+            } else if request.starts_with("POST") && request.contains("/elements") {
+                let id = if request.contains("label == '更多'") { "MORE" } else { "MENU" };
+                ok(&format!(r#"{{"value":[{{"ELEMENT":"{id}"}}]}}"#))
+            } else if let Some(rest) = request.split("/element/").nth(1).filter(|_| request.contains("/click")) {
+                observed_clicks.lock().unwrap().push(rest.split('/').next().unwrap_or("").to_string());
+                ok(r#"{"value":null}"#)
+            } else {
+                ok(r#"{"value":null}"#)
+            }
+        });
+        let app = http::router(build_state_with_runner(&base));
+        let read = |app: axum::Router| async move {
+            let response = app
+                .oneshot(Request::builder().uri("/agent/elements").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+        let first = read(app.clone()).await;
+        let snapshot = first["snapshot"].as_str().unwrap().to_string();
+        let more = first["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|row| row["label"] == "更多")
+            .unwrap();
+        // Another read moves the daemon's tree on: the old token is now stale
+        // as a whole-screen hash.
+        let second = read(app.clone()).await;
+        assert_ne!(second["snapshot"].as_str().unwrap(), snapshot);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control")
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"type": "tap", "element": more, "snapshot": snapshot, "ttl_ms": 2000})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(*clicks.lock().unwrap(), vec!["MORE".to_string()]);
+
+        // The tap was posted, so the next index from the same old snapshot
+        // reads the tree afresh and still finds its row.
+        let menu = first["elements"].as_array().unwrap().iter().position(|row| row["label"] == "菜单").unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control")
+                    .header("x-phone-control", "1")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"type": "tap", "element": menu, "snapshot": snapshot, "ttl_ms": 2000})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(*clicks.lock().unwrap(), vec!["MORE".to_string(), "MENU".to_string()]);
+    });
+}
+
+#[test]
 fn webrtc_routes_are_gone() {
     // iPhone Mirroring and its WebRTC transport were removed in v0.9.
     block(async {

@@ -367,6 +367,11 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"launch_app","app":"微信"}                       // any app's exact name, or a loose name that starts a word of exactly ONE installed app ("idol ludo" → Idol Ludo Board); the step result's `resolved` {app,name,bundle_id,match} says which; 422 ambiguous_app|app_not_found|app_not_installed (+candidates), nothing sent
 {"type":"open_url","url":"https://example.com/page"}    // http/https always; other schemes only if the owner allows them (403 url_scheme_not_allowed)
 {"type":"tap","element":3,"snapshot":"…"}               // from the SAME elements read
+// A token from an older read of the SAME screen still works when the screen only changed a little
+// (clock, badge, a switch you just flipped, keyboard): the row is found again by kind + identifier +
+// label + enclosing rows, never by value or frame. Another app, another page (navigation bar differs),
+// a new alert/sheet, most rows replaced, or a row with no label/identifier → 409 stale_element_snapshot;
+// two look-alikes nothing tells apart → ambiguous. Either way nothing is sent: read again.
 {"type":"tap","label":"新备忘录"}                         // exact, unique; add "kind":"Button" if a StaticText shares it
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
 {"type":"tap","x":0.5,"y":0.3}                          // last resort
