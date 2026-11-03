@@ -135,17 +135,16 @@ fn live_json(
     scope: LiveScope,
     now: Instant,
 ) -> Option<Value> {
-    if live.seq <= since
-        || live.owner != owner
-        || live.scope != scope
-        || now
-            .checked_duration_since(live.created)
-            .is_none_or(|age| age >= LIVE_TARGET_TTL)
-    {
+    let age = now.checked_duration_since(live.created)?;
+    if live.seq <= since || live.owner != owner || live.scope != scope || age >= LIVE_TARGET_TTL {
+        return None;
+    }
+    let ttl_ms = LIVE_TARGET_TTL.saturating_sub(age).as_millis() as u64;
+    if ttl_ms == 0 {
         return None;
     }
     Some(
-        json!({"seq":live.seq,"at_ms":live.at_ms,"action_type":live.action_type,"target":live.target}),
+        json!({"seq":live.seq,"at_ms":live.at_ms,"action_type":live.action_type,"ttl_ms":ttl_ms,"target":live.target}),
     )
 }
 
@@ -274,8 +273,17 @@ fn line(en: impl Into<String>, zh: impl Into<String>) -> Line {
 /// label, identifier or kind), a label, a locator, or a point.
 fn key_label(label: &str) -> bool {
     let label = label.trim();
+    let lower = label.to_ascii_lowercase();
     !label.is_empty()
-        && (label.chars().count() == 1 || label.chars().next().is_some_and(char::is_numeric))
+        && (label.chars().count() == 1
+            || label.chars().any(char::is_numeric)
+            || [
+                "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+            ]
+            .contains(&lower.as_str())
+            || ["digit", "key", "number", "numeric"]
+                .iter()
+                .any(|prefix| lower.starts_with(prefix)))
 }
 
 fn sensitive_input(row: &ElementRow) -> bool {
@@ -628,6 +636,17 @@ mod tests {
         assert!(history.get("target").is_none());
         let live = log.live.as_ref().unwrap();
         assert!(live_json(live, 0, "agent", scope, live.created).is_some());
+        assert_eq!(
+            live_json(
+                live,
+                0,
+                "agent",
+                scope,
+                live.created + Duration::from_millis(1200)
+            )
+            .unwrap()["ttl_ms"],
+            300
+        );
         assert!(live_json(live, 0, "other", scope, live.created).is_none());
         assert!(live_json(
             live,
@@ -673,10 +692,10 @@ mod tests {
         );
         assert_eq!(
             en(
-                json!({"type":"tap_locator","locator":{"identifier":"One"}}),
+                json!({"type":"tap_locator","locator":{"identifier":"Confirm"}}),
                 None
             ),
-            "Tapped “One”"
+            "Tapped “Confirm”"
         );
     }
 
@@ -829,6 +848,10 @@ mod tests {
             ("Key", "Q"),
             ("Button", "A"),
             ("Button", "2 ABC"),
+            ("Button", "Digit 1"),
+            ("Button", "KEY 2"),
+            ("Button", "Digit One"),
+            ("Button", "one"),
             ("Button", "2\nABC"),
             ("Button", "٢ أبج"),
         ] {

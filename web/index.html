@@ -6148,12 +6148,12 @@ function activityNormalizedTarget(target) {
   }
   return { point, rect, aspect };
 }
-function showAgentActivityTarget(item) {
+function showAgentActivityTarget(item, remainingMs = 1200) {
   if (!['tap', 'tap_locator', 'longpress'].includes(item.action_type)) return;
   // No replay of a hidden tab's old actions, or a disconnected device's feed.
   // Freshness comes from the server's monotonic TTL and the poll seq guard,
   // not from comparing two machines' wall clocks.
-  if (document.visibilityState !== 'visible' || overlayState !== 'hidden') return;
+  if (document.visibilityState !== 'visible' || overlayState !== 'hidden' || !Number.isFinite(remainingMs) || remainingMs <= 0) return;
   const target = activityNormalizedTarget(item.target);
   const content = visibleFrameContentRect();
   if (!target || !content) return;
@@ -6168,7 +6168,7 @@ function showAgentActivityTarget(item) {
     Object.assign(el.style, styles);
     touchLayer.append(el);
     el.addEventListener('animationend', () => el.remove(), { once: true });
-    setTimeout(() => el.remove(), 1200);
+    setTimeout(() => el.remove(), Math.min(1200, remainingMs));
   };
   add('ripple agent', {
     left: (left + target.point[0] * content.width) + 'px',
@@ -6189,6 +6189,7 @@ async function pollAgentActivity() {
   try {
     const since = agentActivityCursor ?? 0;
     const limit = agentActivityCursor === null ? 0 : 20;
+    const requestedAt = performance.now();
     const r = await fetch(`${BASE}/agent/activity?since=${since}&limit=${limit}&live=${agentActivityCursor !== null}`, { cache: 'no-store' });
     if (!r.ok) return;
     const feed = await r.json();
@@ -6197,7 +6198,8 @@ async function pollAgentActivity() {
     const items = Array.isArray(feed?.items) ? feed.items : [];
     if (initial) return;
     const live = feed.live_target;
-    if (live && Number.isFinite(live.seq) && live.seq > since) showAgentActivityTarget(live);
+    const remainingMs = live?.ttl_ms - (performance.now() - requestedAt);
+    if (live && Number.isFinite(live.seq) && live.seq > since && Number.isFinite(live.ttl_ms) && remainingMs > 0) showAgentActivityTarget(live, remainingMs);
     if (!items.length) return;
     const last = items[items.length - 1];
     const who = document.createElement('span');

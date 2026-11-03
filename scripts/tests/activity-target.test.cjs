@@ -9,13 +9,14 @@ const html = fs.readFileSync(path.join(__dirname, '../../web/index.html'), 'utf8
 
 function panel() {
   const nodes = [], timers = [];
+  let monotonic = 0;
   const frame = {
     classList: { contains: () => true }, width: 200, height: 400,
     getBoundingClientRect: () => ({ left: 100, top: 50, width: 400, height: 400 }),
   };
   const activity = { replaceChildren() {}, classList: { add() {}, remove() {} } };
   const ctx = vm.createContext({
-    Date: { now: () => 10000 }, Number, Math,
+    Date: { now: () => 10000 }, performance: {now:()=>monotonic}, Number, Math,
     h264Frame: frame, mjpegFrame: frame, stillFrame: frame,
     overlayState: 'hidden', LANG: 'en', BASE: '',
     document: {
@@ -31,10 +32,10 @@ function panel() {
   });
   vm.runInContext(html.slice(html.indexOf('function visibleFrameContentRect()'), html.indexOf('/* ── Direct HTTP control')), ctx);
   vm.runInContext(html.slice(html.indexOf('const agentActivityEl ='), html.indexOf('/* ── Boot')), ctx);
-  return { ctx, nodes, timers, frame };
+  return { ctx, nodes, timers, frame, advance:ms=>{monotonic+=ms;} };
 }
 const normalized = { coordinate_space: 'normalized', point: [0.25, 0.75] };
-const item = target => ({ seq: 1, at_ms: 10000, action_type: 'tap', target });
+const item = target => ({ seq: 1, at_ms: 10000, ttl_ms:1500, action_type: 'tap', target });
 
 test('requires explicit units and complete finite geometry', () => {
   const { ctx } = panel();
@@ -155,4 +156,13 @@ test('tab hidden while live feedback is in flight draws no pointer', async () =>
   }});
   await ctx.pollAgentActivity();
   assert.equal(nodes.length,0);
+});
+
+
+test('remaining server lifetime accounts for old targets plus network time', async () => {
+  const {ctx,nodes,advance}=panel();let feed={next:1,items:[]};
+  ctx.fetch=async()=>({ok:true,json:async()=>feed});await ctx.pollAgentActivity();
+  const live={...item(normalized),seq:2,ttl_ms:50};
+  ctx.fetch=async()=>{advance(80);return {ok:true,json:async()=>({next:2,items:[live],live_target:live})};};
+  await ctx.pollAgentActivity();assert.equal(nodes.length,0);
 });
