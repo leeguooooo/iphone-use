@@ -7083,15 +7083,17 @@ async fn fetch_snapshot_row(
         .filter(|snapshot| !snapshot.is_empty())
         .ok_or(SnapshotElementTapError::Invalid)?;
 
+    w.rebound_row = None;
     // Taken before the fresh read: that read joins the bounded history and
     // could push the caller's snapshot out of it.
     let served = w.served_tree(|served| {
         element_snapshot_id(served).is_ok_and(|id| id == expected_snapshot)
     });
-    let rows = w
-        .elements()
+    let snapshot = w
+        .element_snapshot()
         .await
         .map_err(SnapshotElementTapError::BeforeDispatch)?;
+    let rows = snapshot.rows;
     let current_snapshot =
         element_snapshot_id(&rows).map_err(SnapshotElementTapError::BeforeDispatch)?;
     if current_snapshot != expected_snapshot {
@@ -7108,8 +7110,26 @@ async fn fetch_snapshot_row(
         if index >= served.len() {
             return Err(SnapshotElementTapError::Invalid);
         }
+        // A cut-off tree can hide a second look-alike of the row.
+        if !snapshot.coverage.is_complete() {
+            return Err(SnapshotElementTapError::Refused(
+                "target_scope_unproven",
+                TARGET_SCOPE_UNPROVEN_HINT,
+            ));
+        }
         return match rebind_snapshot_row(&served, index, &rows) {
             RowRebind::Index(live) => {
+                // A system alert may not show in the tree at all, and a click
+                // under it is acknowledged without effect: ask runner live.
+                w.forget_alert_probe();
+                if w
+                    .alert_summary()
+                    .await
+                    .map_err(SnapshotElementTapError::BeforeDispatch)?
+                    .is_some()
+                {
+                    return Err(SnapshotElementTapError::Stale);
+                }
                 tracing::info!(
                     "snapshot row {index} rebound to live row {live} after the screen changed"
                 );
@@ -7334,21 +7354,32 @@ fn rebind_snapshot_row(
     RowRebind::Index(found)
 }
 
-/// How many rows on each side of a rebound row must read the same.
+/// How many identified rows on each side of a rebound row must read the same.
 const REBIND_NEIGHBOURS: usize = 2;
 
-/// The identities of the rows just before and after `index`, with the ends
-/// of the tree marked so a row that became first or last does not match.
+/// The identities of the nearest identified rows before and after `index`.
+/// Unidentified rows are skipped, not compared: two of them always read the
+/// same, so a `删除` button between blank rows would otherwise match the
+/// `删除` of another list item. Fewer rows on a side (the tree's end) keeps
+/// that side short, so a row that became first or last does not match.
 fn row_neighbours(
     rows: &[crate::runner::ElementRow],
     index: usize,
-) -> Vec<Option<RowIdentity<'_>>> {
-    (1..=REBIND_NEIGHBOURS)
+) -> (Vec<RowIdentity<'_>>, Vec<RowIdentity<'_>>) {
+    let before = rows[..index]
+        .iter()
         .rev()
-        .map(|step| index.checked_sub(step))
-        .chain((1..=REBIND_NEIGHBOURS).map(|step| Some(index + step)))
-        .map(|at| at.and_then(|at| rows.get(at)).map(row_identity))
-        .collect()
+        .map(row_identity)
+        .filter(Option::is_some)
+        .take(REBIND_NEIGHBOURS)
+        .collect();
+    let after = rows[index + 1..]
+        .iter()
+        .map(row_identity)
+        .filter(Option::is_some)
+        .take(REBIND_NEIGHBOURS)
+        .collect();
+    (before, after)
 }
 
 /// How long a tree read stays reusable for a snapshot-bound action.
@@ -7366,6 +7397,7 @@ async fn fetch_snapshot_row_reusing(
     w: &mut crate::runner::RunnerClient,
     value: &serde_json::Value,
 ) -> Result<(Vec<crate::runner::ElementRow>, usize, bool), SnapshotElementTapError> {
+    w.rebound_row = None;
     let index = value
         .get("element")
         .and_then(serde_json::Value::as_u64)
@@ -30194,6 +30226,11 @@ mod snapshot_rebind_tests {
         new.insert(4, row(1, "StaticText", "已连接"));
         assert_eq!(rebind_snapshot_row(&old, 7, &new), RowRebind::Index(8));
         assert_eq!(rebind_snapshot_row(&old, 8, &new), RowRebind::Index(9));
+        // The clock is one of the 设置 button's two neighbours: a tick there
+        // already makes that row unprovable.
+        let mut clock_only = settings();
+        clock_only[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&old, 3, &clock_only), RowRebind::Stale);
     }
 
     #[test]
@@ -30322,6 +30359,23 @@ mod snapshot_rebind_tests {
         let mut clock = list("Item 5");
         clock[1].label = "10:42".into();
         assert_eq!(rebind_snapshot_row(&list("Item 5"), 10, &clock), RowRebind::Index(10));
+    }
+
+    #[test]
+    fn a_title_beyond_blank_rows_still_tells_items_apart() {
+        // Unlabeled controls between an item's text and its 删除 read the
+        // same in every item; the text further up is what tells them apart.
+        let list = |item: &str| {
+            let mut rows = settings();
+            rows.push(row(3, "StaticText", item));
+            rows.extend((0..3).map(|_| row(3, "Button", "")));
+            rows.push(row(3, "Button", "删除"));
+            rows
+        };
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 13, &list("Item 12")), RowRebind::Stale);
+        let mut clock = list("Item 5");
+        clock[1].label = "10:42".into();
+        assert_eq!(rebind_snapshot_row(&list("Item 5"), 13, &clock), RowRebind::Index(13));
     }
 
     #[test]

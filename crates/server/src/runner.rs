@@ -108,6 +108,8 @@ pub(crate) fn post_mutates_screen(path: &str) -> bool {
 /// An agent acts on a tree it read moments ago; a few cover a batch.
 const SERVED_TREES_CAP: usize = 8;
 
+type ReadScope = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -144,7 +146,9 @@ pub struct RunnerClient {
     /// The last few complete trees read, newest last. A snapshot-bound action
     /// whose token no longer matches the live tree looks its snapshot up here
     /// to learn which element the index named (see [`Self::served_tree`]).
-    served_trees: std::collections::VecDeque<std::sync::Arc<Vec<ElementRow>>>,
+    /// Each keeps the authorization it was read under, so a tree read before
+    /// an owner change or a privacy hold is never used afterwards.
+    served_trees: std::collections::VecDeque<(std::sync::Arc<Vec<ElementRow>>, Option<ReadScope>)>,
     /// `(snapshot index, live index)` when the current snapshot-bound action
     /// found its row in a changed tree; the response reports it.
     pub rebound_row: Option<(usize, usize)>,
@@ -2477,7 +2481,8 @@ impl RunnerClient {
         self.last_tree = SnapshotCoverage::from_tree(tree).is_complete()
             .then(|| (std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
         if let Some((tree, _)) = &self.last_tree {
-            self.served_trees.push_back(tree.clone());
+            let scope = self.tree_scope.clone().or_else(|| self.observation_scope.clone());
+            self.served_trees.push_back((tree.clone(), scope));
             while self.served_trees.len() > SERVED_TREES_CAP {
                 self.served_trees.pop_front();
             }
@@ -2597,7 +2602,12 @@ impl RunnerClient {
         is_snapshot: impl Fn(&[ElementRow]) -> bool,
     ) -> Option<std::sync::Arc<Vec<ElementRow>>> {
         if self.tree_scope.as_ref().or(self.observation_scope.as_ref()).is_some_and(|allowed| !allowed()) { return None; }
-        self.served_trees.iter().rev().find(|rows| is_snapshot(rows)).cloned()
+        self.served_trees
+            .iter()
+            .rev()
+            .filter(|(_, scope)| scope.as_ref().is_none_or(|allowed| allowed()))
+            .find(|(rows, _)| is_snapshot(rows))
+            .map(|(rows, _)| rows.clone())
     }
 
     pub fn settle_frames_usable(&self) -> bool {
@@ -2638,7 +2648,12 @@ impl RunnerClient {
     }
 
     pub fn bind_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        // Trees already served stay: each lapses on its own scope, and a batch
+        // or an observed action must not forget the snapshot its steps name.
+        let mut served = std::mem::take(&mut self.served_trees);
+        served.retain(|(_, scope)| scope.is_some());
         self.forget_observations();
+        self.served_trees = served;
         self.tree_scope = None;
         self.observation_scope = Some(allowed);
     }

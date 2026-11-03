@@ -1620,7 +1620,9 @@ fn an_index_from_an_older_snapshot_still_taps_its_row_after_the_clock_ticks() {
             } else if request.contains("/window/size") {
                 ok(r#"{"value":{"width":390,"height":844}}"#)
             } else if request.contains("/alert/text") {
-                ok(r#"{"value":{"error":"no such alert","message":"no alert"}}"#)
+                // A rebind asks runner live whether an alert is up: none is.
+                let body = r#"{"value":{"error":"no such alert","message":"no alert"}}"#;
+                Some((std::time::Duration::ZERO, format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())))
             } else if request.starts_with("POST") && request.contains("/elements") {
                 let id = if request.contains("label == '更多'") { "MORE" } else { "MENU" };
                 ok(&format!(r#"{{"value":[{{"ELEMENT":"{id}"}}]}}"#))
