@@ -555,7 +555,7 @@ expected_role_valid() {
 # contains must still have one of the exact runner/relay shapes that setup writes.
 # The device runner is launched from its built product; the WebDriverAgent form
 # is what releases before it wrote, and stays recognised for their leftovers.
-RUNNER_ARGV_PATTERN='^(/[^ ]*/)?xcodebuild -destination platform=iOS,id=[0-9A-Fa-f-]+ test-without-building -xctestrun /[^ ]+/IPhoneUseRunner_[^ /]+\.xctestrun -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe( -allowProvisioningUpdates -authenticationKeyPath /[^|[:cntrl:]]+\.p8 -authenticationKeyID [A-Za-z0-9]+ -authenticationKeyIssuerID [A-Za-z0-9-]+ -allowProvisioningDeviceRegistration)?$'
+RUNNER_ARGV_PATTERN='^(/[^ ]*/)?xcodebuild -destination platform=iOS,id=[0-9A-Fa-f-]+ test-without-building -xctestrun /[^ ]+/IPhoneUseRunner_[^ /]+\.xctestrun -only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe( -collect-test-diagnostics never)?( -allowProvisioningUpdates -authenticationKeyPath /[^|[:cntrl:]]+\.p8 -authenticationKeyID [A-Za-z0-9]+ -authenticationKeyIssuerID [A-Za-z0-9-]+ -allowProvisioningDeviceRegistration)?$'
 command_matches_expected() {
     local command="$1"
     local expected="$2"

@@ -220,6 +220,12 @@ pub fn runner_signature_valid(signature: &str) -> bool {
     if let ["-destination", dest, "test-without-building", "-xctestrun", run, "-only-testing:IPhoneUseRunnerUITests/RunnerTests/testServe", tail @ ..] =
         tokens.as_slice()
     {
+        // `-collect-test-diagnostics never` since #402; earlier releases
+        // launched without it, and their runners must still be recognised.
+        let tail = match tail {
+            ["-collect-test-diagnostics", "never", rest @ ..] => rest,
+            _ => tail,
+        };
         let tail_ok = match tail {
             [] => !asc,
             ["-allowProvisioningUpdates"] => asc,
@@ -737,6 +743,14 @@ mod tests {
             !runner_signature_valid(&format!("{RUNNER} -allowProvisioningUpdates")),
             "updates flag only with the ASC suffix"
         );
+        // #402: diagnostics collection turned off, with and without ASC.
+        let quiet = format!("{RUNNER} -collect-test-diagnostics never");
+        assert!(runner_signature_valid(&quiet));
+        assert!(runner_signature_valid(&format!(
+            "{quiet} -allowProvisioningUpdates -authenticationKeyPath /k.p8 -authenticationKeyID ABC123 -authenticationKeyIssuerID 1a2b-3c -allowProvisioningDeviceRegistration"
+        )));
+        assert!(!runner_signature_valid(&format!("{RUNNER} -collect-test-diagnostics on-failure")));
+        assert!(!runner_signature_valid(&format!("{RUNNER} -collect-test-diagnostics never -collect-test-diagnostics never")));
         assert!(!runner_signature_valid(&format!("{RUNNER} -authenticationKeyPath /k.p8 -authenticationKeyID A -authenticationKeyIssuerID B -allowProvisioningDeviceRegistration")));
         assert!(!runner_signature_valid(
             &RUNNER.replace("testServe", "testOther")

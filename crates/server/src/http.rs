@@ -811,8 +811,10 @@ async fn agent_owner_inner(
     // While a lease is live the idle watchdog leaves the phone alone; the
     // idle window starts when it is given back, not at the last action.
     state.touch_activity();
-    // The task is over: the watchdog releases the phone now (#task-end).
-    if current.is_some() {
+    // The task is over: the watchdog releases the phone now. A named session
+    // ends its task even when its lease already lapsed (a long think, or a
+    // task that only read the screen: reads do not renew the lease).
+    if current.is_some() || matches!(claim, OwnerClaim::Named(_) | OwnerClaim::Takeover(_)) {
         note_task_end();
     }
     let mut released = serde_json::json!({"ok": true, "owner": null});
@@ -22935,6 +22937,24 @@ fn attach_ocr<E: Into<OcrFailure>>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_named_release_ends_the_task_even_after_its_lease_lapsed() {
+        use tower::ServiceExt;
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let state = fixture_app_state(None);
+            assert!(state.owner.lock().unwrap().is_none(), "no live lease: it lapsed, or the task only read");
+            let before = Instant::now();
+            let response = router(state.clone()).oneshot(
+                axum::http::Request::builder().method("POST").uri("/agent/owner")
+                    .header("x-phone-control", "1").header("x-phone-owner", "reader-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"release":true}"#)).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let ended = recover(TASK_ENDED_AT.lock()).expect("the task end was noted");
+            assert!(ended >= before);
+        });
+    }
+
     #[test]
     fn a_task_ends_on_release_or_a_lapsed_lease_until_the_phone_is_driven_again() {
         let lease = std::time::Duration::from_secs(300);

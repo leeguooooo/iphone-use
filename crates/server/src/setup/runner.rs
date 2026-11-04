@@ -58,19 +58,132 @@ pub fn xcodebuild_args(ctx: &Ctx, args: &[String]) -> Result<Vec<String>, String
     Ok(out)
 }
 
+/// Turns off xcodebuild's diagnostics collection for the runner's test (#402).
+/// By default a failed test session makes xcodebuild run `devicectl diagnose`:
+/// a full sysdiagnose of the iPhone and of the Mac (~0.9 GB together, several
+/// minutes), saved into a fresh DerivedData result bundle. The runner's test
+/// never passes — it serves until it is stopped — and a supervisor relaunching
+/// a failing runner repeats that every round: one Mac here held 583 such
+/// bundles (10 GB), 13 of them with an iPhone sysdiagnose.
+pub const NO_TEST_DIAGNOSTICS: [&str; 2] = ["-collect-test-diagnostics", "never"];
+
+/// Whether this xcodebuild's `-help` lists `-collect-test-diagnostics`
+/// (older Xcodes refuse unknown options, so the flag is only passed when it is).
+pub fn supports_no_test_diagnostics(help: &str) -> bool {
+    help.contains(NO_TEST_DIAGNOSTICS[0])
+}
+
+/// `IPU_RUNNER_TEST_DIAGNOSTICS=1` keeps xcodebuild's diagnostics collection,
+/// for debugging a runner that will not start.
+pub fn test_diagnostics_wanted() -> bool {
+    std::env::var("IPU_RUNNER_TEST_DIAGNOSTICS").is_ok_and(|v| v.trim() == "1")
+}
+
+/// Result-log directories `test-without-building` leaves in Xcode's
+/// DerivedData (`IPhoneUseRunner-<hash>/Logs/Test/*.xcresult`), one per
+/// launch, never cleaned (#402: 898 of them, 11 GB on one Mac). Removes the
+/// ones that hold nothing but such logs and have not changed for `idle`,
+/// keeping the newest `keep`. A directory with anything else in it — a build
+/// of the runner project opened in Xcode — is never touched.
+/// Returns (removed, bytes freed).
+pub fn sweep_runner_launch_logs(derived_data: &Path, idle: std::time::Duration, keep: usize) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(derived_data) else { return (0, 0) };
+    let now = std::time::SystemTime::now();
+    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("IPhoneUseRunner-"))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .filter(|dir| only_runner_launch_logs(dir))
+        .filter_map(|dir| Some((newest_mtime(&dir)?, dir)))
+        .collect();
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = 0;
+    let mut freed = 0;
+    for (modified, dir) in candidates.into_iter().skip(keep) {
+        if now.duration_since(modified).unwrap_or_default() < idle {
+            continue;
+        }
+        let bytes = tree_bytes(&dir);
+        if std::fs::remove_dir_all(&dir).is_ok() {
+            removed += 1;
+            freed += bytes;
+        }
+    }
+    (removed, freed)
+}
+
+/// `dir` holds only `Logs/`, and its `Logs/Test` only the runner's result
+/// bundles (`Test-IPhoneUseRunner-*.xcresult`) and their bookkeeping.
+fn only_runner_launch_logs(dir: &Path) -> bool {
+    let names = |path: &Path| -> Option<Vec<String>> {
+        Some(std::fs::read_dir(path).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+    };
+    let Some(top) = names(dir) else { return false };
+    if top.iter().any(|name| name != "Logs" && name != ".DS_Store") || !top.iter().any(|n| n == "Logs") {
+        return false;
+    }
+    let tests = names(&dir.join("Logs").join("Test")).unwrap_or_default();
+    tests.iter().all(|name| {
+        name.starts_with("Test-IPhoneUseRunner-") || name == "LogStoreManifest.plist" || name == ".DS_Store"
+    })
+}
+
+/// Newest modification time in the tree; `DirEntry::metadata` does not follow
+/// symlinks, so a link out of the directory is never walked.
+fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let mut newest = std::fs::symlink_metadata(dir).ok()?.modified().ok()?;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if let Ok(modified) = meta.modified() {
+                newest = newest.max(modified);
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Some(newest)
+}
+
+fn tree_bytes(dir: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
 /// The launch argv; also the runner's PID identity (see pid.rs).
-pub fn runner_argv(ctx: &Ctx, udid: &str, xctestrun: &Path) -> Result<Vec<String>, String> {
-    xcodebuild_args(
-        ctx,
-        &[
-            "-destination".into(),
-            format!("platform=iOS,id={udid}"),
-            "test-without-building".into(),
-            "-xctestrun".into(),
-            xctestrun.to_string_lossy().into_owned(),
-            format!("-only-testing:{RUNNER_TEST_ID}"),
-        ],
-    )
+/// `no_diagnostics` adds [`NO_TEST_DIAGNOSTICS`].
+pub fn runner_argv(
+    ctx: &Ctx,
+    udid: &str,
+    xctestrun: &Path,
+    no_diagnostics: bool,
+) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        "-destination".into(),
+        format!("platform=iOS,id={udid}"),
+        "test-without-building".into(),
+        "-xctestrun".into(),
+        xctestrun.to_string_lossy().into_owned(),
+        format!("-only-testing:{RUNNER_TEST_ID}"),
+    ];
+    if no_diagnostics {
+        args.extend(NO_TEST_DIAGNOSTICS.map(String::from));
+    }
+    xcodebuild_args(ctx, &args)
 }
 
 /// Every build-time xcodebuild of the runner project.
@@ -903,6 +1016,42 @@ pub fn prepare_xcconfig(ctx: &Ctx) -> Result<(String, Option<PathBuf>), String> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sweeps_only_runner_launch_logs_and_keeps_the_newest() {
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str, extra: Option<&str>| {
+            let test = root.path().join(name).join("Logs/Test");
+            let bundle = test.join("Test-IPhoneUseRunner-2026.11.04_15-54-45-+0900.xcresult/Data");
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::write(bundle.join("blob"), vec![0u8; 1000]).unwrap();
+            std::fs::write(test.join("LogStoreManifest.plist"), b"x").unwrap();
+            if let Some(extra) = extra {
+                std::fs::create_dir_all(root.path().join(name).join(extra)).unwrap();
+            }
+        };
+        for n in 0..5 {
+            make(&format!("IPhoneUseRunner-launch{n}"), None);
+        }
+        make("IPhoneUseRunner-opened-in-xcode", Some("Build"));
+        make("SomeOtherApp-abc", None);
+        // Nothing idle long enough yet: a launch in progress is never removed.
+        assert_eq!(sweep_runner_launch_logs(root.path(), std::time::Duration::from_secs(600), 3), (0, 0));
+        let (removed, freed) = sweep_runner_launch_logs(root.path(), std::time::Duration::ZERO, 3);
+        assert_eq!(removed, 2, "five launch dirs, three kept");
+        assert!(freed >= 2000);
+        let left: Vec<String> = std::fs::read_dir(root.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(left.contains(&"IPhoneUseRunner-opened-in-xcode".to_string()), "a project build is not ours to clean");
+        assert!(left.contains(&"SomeOtherApp-abc".to_string()));
+        assert_eq!(left.iter().filter(|n| n.starts_with("IPhoneUseRunner-launch")).count(), 3);
+        assert_eq!(sweep_runner_launch_logs(&root.path().join("missing"), std::time::Duration::ZERO, 0), (0, 0));
+    }
+
+    #[test]
+    fn runner_launch_turns_diagnostics_off_only_when_xcodebuild_has_the_flag() {
+        assert!(supports_no_test_diagnostics("    -collect-test-diagnostics on-failure|never   Whether or not testing collects"));
+        assert!(!supports_no_test_diagnostics("usage: xcodebuild [-project <projectname>]"));
+    }
+
     use super::*;
 
     #[test]
