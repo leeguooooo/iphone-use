@@ -754,6 +754,12 @@ pub struct PhoneHandler {
     /// once at start.
     profile: std::sync::Arc<ToolProfile>,
     instances: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, PhoneHandler>>>,
+    /// When this session last saw the phone usable (a status that said so,
+    /// or a phone tool that succeeded). Within [`RECONNECT_CHECK_FRESH`] the
+    /// on-use reconnect skips its status read: the phone was driven too
+    /// recently for the idle release, and this session's own task end
+    /// clears it.
+    usable_seen: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 /// Parameters for [`PhoneHandler::phone_login`].
@@ -862,6 +868,9 @@ const RECONNECT_ON_USE_TOOLS: &[&str] = &[
 /// How long a tool call waits for the phone it brings back. A cached runner
 /// starts in ~13 s; a rebuild after an upgrade takes 1–2 min.
 const RECONNECT_ON_USE_BUDGET: std::time::Duration = std::time::Duration::from_secs(150);
+
+/// See [`PhoneHandler::usable_seen`]. Well under the idle window (300 s).
+const RECONNECT_CHECK_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn reconnect_on_use(tool: &str) -> bool {
     RECONNECT_ON_USE_TOOLS.contains(&tool)
@@ -1180,7 +1189,22 @@ impl PhoneHandler {
             progress: std::sync::Arc::default(),
             profile,
             instances: std::sync::Arc::default(),
+            usable_seen: std::sync::Arc::default(),
         }
+    }
+
+    fn note_usable(&self, usable: bool) {
+        if let Ok(mut seen) = self.usable_seen.lock() {
+            *seen = usable.then(std::time::Instant::now);
+        }
+    }
+
+    fn usable_recently(&self) -> bool {
+        self.usable_seen
+            .lock()
+            .ok()
+            .and_then(|seen| *seen)
+            .is_some_and(|at| at.elapsed() < RECONNECT_CHECK_FRESH)
     }
 
     /// The same handler exposing `profile` instead of the environment's.
@@ -1246,7 +1270,13 @@ impl PhoneHandler {
     /// returns that instead. Anything unexpected runs the tool unchanged, so
     /// the daemon's own refusal still reaches the model.
     async fn reconnect_for_use(&self, tool: &str) -> Result<Option<String>, CallToolResult> {
+        if self.usable_recently() {
+            return Ok(None);
+        }
         let Ok(status) = self.daemon.status().await else { return Ok(None) };
+        if status.drivable == Some(true) {
+            self.note_usable(true);
+        }
         if !may_reconnect_for_use(&status, self.daemon.owner()) {
             return Ok(None);
         }
@@ -1259,6 +1289,7 @@ impl PhoneHandler {
         self.progress_reset();
         let wait = self.wait_until_drivable(RECONNECT_ON_USE_BUDGET).await;
         if wait.outcome == "drivable" {
+            self.note_usable(true);
             return Ok(Some(format!(
                 "the phone was released after the last task; brought it back for this call in {} s",
                 wait.json["waited_secs"]
@@ -3678,6 +3709,11 @@ impl ServerHandler for PhoneHandler {
         // Last, so a result whose text is the JSON body still starts with it.
         if let Some(note) = reconnected {
             result.content.push(Content::text(note));
+        }
+        if name == "phone_release_owner" {
+            handler.note_usable(false); // the task ended: the phone is released
+        } else if RECONNECT_ON_USE_TOOLS.contains(&name.as_ref()) && result.is_error != Some(true) {
+            handler.note_usable(true);
         }
         result.meta.get_or_insert_with(rmcp::model::Meta::new).0
             .insert("iphone-use/instance".into(), serde_json::json!(instance));
