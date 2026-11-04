@@ -53,7 +53,7 @@ class CompatTargetTests(unittest.TestCase):
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             env={k:v for k,v in os.environ.items() if not k.startswith(('IPHONE_USE_','PHONE_REMOTE_','IPU_'))}
             env.update(PATH=str(root)+os.pathsep+os.environ.get('PATH',''),FAKE_XCRUN_LOG=str(probe),
-                       IPHONE_USE_URL=f'http://127.0.0.1:{server.server_port}',IPHONE_USE_MCP_PREWARM='0',
+                       IPHONE_USE_URL=f'http://127.0.0.1:{server.server_port}',IPHONE_USE_MCP_PREWARM='0',IPHONE_USE_MCP_RECONNECT_ON_USE='0',
                        IPHONE_USE_MCP_TOOLS='all',IPHONE_USE_MCP_STRUCTURED='full',IPHONE_USE_FLOWS_NO_AUTO_UPDATE='1',
                        IPHONE_USE_FLOWS_DIR=str(root/'flows'),IPHONE_USE_STATE_DIR=str(root/'state'),RUST_LOG='error')
             with (root/'stderr.log').open('wb') as log:
