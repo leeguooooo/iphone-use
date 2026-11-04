@@ -436,6 +436,21 @@ some content before an error, so inspect the field and the returned outcome
 before retrying. An acknowledged clear is not independent proof that the field
 is empty or that its focus stayed unchanged.
 
+On a runner with the selected input target, a `set_value` replacement returns
+a `replacement` block — on success and on failure: `phase`
+(`clear`/`type`/`verify`/`done`), `clear.status` (`cleared`, `recovered`,
+`failed`, `not_sent`), `segments_total`/`segments_delivered`,
+`characters_confirmed`/`characters_uncertain`/`characters_total` and
+`stopped_at_segment` (1-based), plus `segments[]` with each segment's
+`characters` and `status` (`delivered`, `uncertain`, `not_sent`). When the
+field loses focus or selection during the clear, the daemon reads it back: a
+field still holding its old value, or one already empty, is bound again once
+(at most one guarded focus tap) and the replacement continues
+(`clear.status:"recovered"`); a field left partly cleared or unreadable stops
+before any text is typed. A clear that keeps failing on an unchanged field
+answers `replacement_not_applied`. Older runners keep the plain clear/type
+path without this block.
+
 `volume_up` and `volume_down` require a physical device and a Runner advertising `ipu:volumeButtons=true`. Missing capability refuses before the button request. An acknowledgement does not verify the volume level; do not replay an uncertain press.
 
 `phone_shortcut {"name":"save_screenshot"}` requests one iOS system screenshot

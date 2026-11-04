@@ -7939,21 +7939,13 @@ async fn set_value_snapshot_element(
     if !allowed() { return Err(SnapshotElementTapError::BeforeDispatch(anyhow::anyhow!("replacement scope ended before binding"))); }
     if !secure {
         if let Some(target) = w.input_target_for_element(&element_id, &text).await.map_err(set_value_dispatch_error)? {
-            if !allowed() { return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended after focus"))); }
-            w.clear_input_target(&target).await.map_err(set_value_dispatch_error)?;
-            for chunk in crate::text_input::split(&text, crate::text_input::CHUNK_CHARS) {
-                if !allowed() { return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended; do not retry"))); }
-                w.keys_to_target(chunk, &target, crate::text_input::chunk_timeout(crate::text_input::char_count(chunk)))
-                    .await.map_err(set_value_dispatch_error)?;
+            let mut receipt = ReplacementReceipt::new(&text);
+            let result = guarded_replacement(w, &element_id, &text, target, allowed, &mut receipt).await;
+            receipt.store(detail);
+            if result.is_ok() {
+                set_value_verification(detail, true, "element_value");
             }
-            let receipt = w.read_element_value(&target, (text.encode_utf16().count() + 1) as u32)
-                .await.map_err(set_value_dispatch_error)?;
-            if !allowed() || receipt.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
-                || receipt.get("value").and_then(serde_json::Value::as_str) != Some(text.as_str()) {
-                return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("selected replacement exact value was not confirmed; do not retry")));
-            }
-            set_value_verification(detail, true, "element_value");
-            return Ok(());
+            return result;
         }
     }
     if text.is_empty() {
@@ -8005,7 +7997,212 @@ async fn set_value_snapshot_element(
     }
 }
 
-const SET_VALUE_NOT_APPLIED_HINT: &str = "runner acknowledged the write but the field reads back a different value — web inputs and some custom fields ignore direct value writes, and autocorrect can rewrite text. Tap the field to focus it, send {\"type\":\"text\",\"text\":…}, then read the field again";
+/// What a guarded `set_value` replacement delivered, published as the
+/// `replacement` block (#399): the clear phase, each segment's characters
+/// (Unicode scalars, as `text` counts them) and whether the runner
+/// acknowledged it, and where it stopped. A segment is `delivered` only when
+/// the runner acknowledged it on the bound field; the one that failed after
+/// dispatch is `uncertain`, and later ones are `not_sent`.
+#[derive(Debug, Clone)]
+struct ReplacementReceipt {
+    phase: &'static str,
+    clear: serde_json::Value,
+    segments: Vec<(usize, &'static str)>,
+    stopped_at: Option<usize>,
+}
+
+impl ReplacementReceipt {
+    fn new(text: &str) -> Self {
+        let segments = crate::text_input::split(text, crate::text_input::CHUNK_CHARS)
+            .into_iter()
+            .map(|chunk| (crate::text_input::char_count(chunk), "not_sent"))
+            .collect();
+        ReplacementReceipt { phase: "clear", clear: serde_json::json!({"status": "pending"}), segments, stopped_at: None }
+    }
+
+    /// Stop at `index` (0-based): that segment is `status`, later ones stay unsent.
+    fn stop(&mut self, index: usize, status: &'static str) {
+        if let Some(segment) = self.segments.get_mut(index) {
+            segment.1 = status;
+        }
+        self.stopped_at = Some(index);
+    }
+
+    fn delivered(&mut self, index: usize) {
+        if let Some(segment) = self.segments.get_mut(index) {
+            segment.1 = "delivered";
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let sum = |status: &str| self.segments.iter().filter(|s| s.1 == status).map(|s| s.0).sum::<usize>();
+        serde_json::json!({
+            "path": "guarded",
+            "phase": self.phase,
+            "clear": self.clear,
+            "segments_total": self.segments.len(),
+            "segments_delivered": self.segments.iter().filter(|s| s.1 == "delivered").count(),
+            "characters_confirmed": sum("delivered"),
+            "characters_uncertain": sum("uncertain"),
+            "characters_total": self.segments.iter().map(|s| s.0).sum::<usize>(),
+            // 1-based, like the segment numbers below.
+            "stopped_at_segment": self.stopped_at.map(|i| i + 1),
+            "segments": self.segments.iter().enumerate()
+                .map(|(i, (chars, status))| serde_json::json!({"segment": i + 1, "characters": chars, "status": status}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn store(&self, detail: &mut Option<serde_json::Value>) {
+        detail.get_or_insert_with(|| serde_json::json!({}))["replacement"] = self.to_json();
+    }
+}
+
+/// The selected field's full value, when the runner can read it completely.
+async fn bound_field_value(w: &mut crate::runner::RunnerClient, element_id: &str) -> Option<String> {
+    let read = w.read_element_value(element_id, 32768).await.ok()?;
+    if read.get("complete").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    read.get("value").and_then(serde_json::Value::as_str).map(str::to_string)
+}
+
+/// What a failed guarded clear left in the field, by comparison with what it
+/// held before (never the contents themselves: they are the person's).
+fn cleared_field_state(before: Option<&str>, after: Option<&str>) -> &'static str {
+    match (before, after) {
+        (_, Some("")) => "empty",
+        (Some(before), Some(after)) if before == after => "unchanged",
+        (_, Some(_)) => "partially_cleared",
+        (_, None) => "unknown",
+    }
+}
+
+const REPLACEMENT_CLEAR_NOT_APPLIED_HINT: &str = "the field could not be cleared after its focus or selection was lost, so no replacement text was typed and the field still holds its earlier value (see replacement.clear). Bring the field back on screen, read /agent/elements again and send set_value with the fresh snapshot";
+
+/// Clear the bound field, recovering once when focus or selection is lost
+/// mid-clear (#399). A refused clear changed nothing; an interrupted one is
+/// judged by reading the field back: empty means the clear did its job,
+/// unchanged means nothing was deleted. Either way the field is bound again
+/// (at most one guarded focus tap) and the replacement goes on — an unchanged
+/// field is cleared once more. A field left partly cleared, or one that
+/// cannot be read, stops the replacement without typing: nothing can finish
+/// it safely.
+async fn clear_bound_with_recovery(
+    w: &mut crate::runner::RunnerClient,
+    element_id: &str,
+    text: &str,
+    target: String,
+    before: Option<&str>,
+    allowed: &(dyn Fn() -> bool + Sync),
+    receipt: &mut ReplacementReceipt,
+) -> Result<String, SnapshotElementTapError> {
+    let mut target = target;
+    for attempt in 0..2 {
+        if !allowed() {
+            return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended before the clear; do not retry")));
+        }
+        let error = match w.clear_input_target(&target).await {
+            Ok(()) => {
+                receipt.clear = if attempt == 0 {
+                    serde_json::json!({"status": "cleared"})
+                } else {
+                    serde_json::json!({"status": "recovered", "field": "unchanged", "rebound": true})
+                };
+                return Ok(target);
+            }
+            Err(error) => error,
+        };
+        if error_never_reached_runner(&error) {
+            receipt.clear = serde_json::json!({"status": "not_sent"});
+            return Err(SnapshotElementTapError::AfterDispatch(error));
+        }
+        let runner_message = crate::runner::runner_http_error(&error).and_then(|runner| runner.message.clone());
+        let refused = crate::runner::runner_http_error(&error).is_some_and(|runner| runner.nothing_sent());
+        let field = if refused {
+            "unchanged"
+        } else {
+            cleared_field_state(before, bound_field_value(w, element_id).await.as_deref())
+        };
+        let unchanged_stop = || SnapshotElementTapError::NoEffect("replacement_not_applied", REPLACEMENT_CLEAR_NOT_APPLIED_HINT);
+        if !matches!(field, "empty" | "unchanged") || attempt == 1 || !allowed() {
+            receipt.clear = serde_json::json!({
+                "status": "failed", "field": field, "attempts": attempt + 1, "runner_message": runner_message,
+            });
+            tracing::warn!("set_value clear did not recover (field {field}): {error:#}");
+            return Err(if field == "unchanged" {
+                unchanged_stop()
+            } else {
+                SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement clear interrupted; the field was left {field}; do not retry"))
+            });
+        }
+        tracing::info!("set_value clear lost the field (left {field}); binding it again once");
+        target = match w.input_target_for_element(element_id, text).await {
+            Ok(Some(target)) => target,
+            Ok(None) | Err(_) => {
+                receipt.clear = serde_json::json!({
+                    "status": "failed", "field": field, "attempts": attempt + 1, "rebind": "failed", "runner_message": runner_message,
+                });
+                return Err(if field == "unchanged" {
+                    unchanged_stop()
+                } else {
+                    SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("the field was cleared but could not be bound again; nothing was typed; do not retry"))
+                });
+            }
+        };
+        if field == "empty" {
+            receipt.clear = serde_json::json!({"status": "recovered", "field": "empty", "rebound": true});
+            return Ok(target);
+        }
+    }
+    Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement clear did not finish; do not retry")))
+}
+
+/// The guarded replacement after binding: clear (with recovery), each
+/// segment through the bound target, then an exact read-back.
+async fn guarded_replacement(
+    w: &mut crate::runner::RunnerClient,
+    element_id: &str,
+    text: &str,
+    target: String,
+    allowed: &(dyn Fn() -> bool + Sync),
+    receipt: &mut ReplacementReceipt,
+) -> Result<(), SnapshotElementTapError> {
+    if !allowed() {
+        return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended after focus")));
+    }
+    // What the field held, so an interrupted clear can be judged by its result.
+    let before = bound_field_value(w, element_id).await;
+    let target = clear_bound_with_recovery(w, element_id, text, target, before.as_deref(), allowed, receipt).await?;
+    receipt.phase = "type";
+    for (index, chunk) in crate::text_input::split(text, crate::text_input::CHUNK_CHARS).into_iter().enumerate() {
+        if !allowed() {
+            receipt.stop(index, "not_sent");
+            return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("replacement scope ended; do not retry")));
+        }
+        if let Err(error) = w
+            .keys_to_target(chunk, &target, crate::text_input::chunk_timeout(crate::text_input::char_count(chunk)))
+            .await
+        {
+            let nothing_sent = error_never_reached_runner(&error)
+                || crate::runner::runner_http_error(&error).is_some_and(|runner| runner.nothing_sent());
+            receipt.stop(index, if nothing_sent { "not_sent" } else { "uncertain" });
+            return Err(set_value_dispatch_error(error));
+        }
+        receipt.delivered(index);
+    }
+    receipt.phase = "verify";
+    let read = w.read_element_value(&target, (text.encode_utf16().count() + 1) as u32)
+        .await.map_err(set_value_dispatch_error)?;
+    if !allowed() || read.get("complete").and_then(serde_json::Value::as_bool) != Some(true)
+        || read.get("value").and_then(serde_json::Value::as_str) != Some(text) {
+        return Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!("selected replacement exact value was not confirmed; do not retry")));
+    }
+    receipt.phase = "done";
+    Ok(())
+}
+
+const SET_VALUE_NOT_APPLIED_HINT: &str ="runner acknowledged the write but the field reads back a different value — web inputs and some custom fields ignore direct value writes, and autocorrect can rewrite text. Tap the field to focus it, send {\"type\":\"text\",\"text\":…}, then read the field again";
 
 fn set_value_readback_verification(detail: &mut Option<serde_json::Value>, actual: &str, expected: &str) {
     let exact = actual == expected;
@@ -13509,6 +13706,9 @@ async fn agent_actions_scoped(
                         None,
                     );
                     copy_app_lifecycle_receipt(&mut body, step_detail.as_ref());
+                    if let Some(replacement) = step_detail.as_ref().and_then(|d| d.get("replacement")) {
+                        body["replacement"] = replacement.clone();
+                    }
                     // The runner's own reason for a refused or failed step.
                     if let Some(runner_error) =
                         step_detail.as_ref().and_then(|d| d.get("runner_error"))
@@ -13540,6 +13740,9 @@ async fn agent_actions_scoped(
                 }
                 if let Some(verification) = step_detail.as_ref().and_then(|detail| detail.get("verification")) {
                     receipt["verification"] = verification.clone();
+                }
+                if let Some(replacement) = step_detail.as_ref().and_then(|detail| detail.get("replacement")) {
+                    receipt["replacement"] = replacement.clone();
                 }
                 crate::action_feedback::enrich(&mut receipt);
                 step_results.push(receipt);
@@ -16069,6 +16272,9 @@ async fn agent_input_inner(
             if let Some(verification) = detail.as_ref().and_then(|detail| detail.get("verification")) {
                 blocks.push(("verification", verification.clone()));
             }
+            if let Some(replacement) = detail.as_ref().and_then(|detail| detail.get("replacement")) {
+                blocks.push(("replacement", replacement.clone()));
+            }
             if let Some(block) = recover(state.agent_focus.lock()).take_notice() {
                 blocks.push(("agent_focus", block));
             }
@@ -16157,8 +16363,22 @@ async fn agent_input_inner(
         RunnerControlOutcome::Failed => with_app_lifecycle_receipt(
             runner_failed_after_dispatch_response_with(detail.as_ref()), detail.as_ref()).await,
     };
+    if !response.status().is_success() {
+        response = with_replacement_receipt(response, detail.as_ref()).await;
+    }
     response.extensions_mut().insert(ActionRequestScope(capture_scope));
     response
+}
+
+/// A failed `set_value` says how far its replacement got (#399).
+async fn with_replacement_receipt(response: Response, detail: Option<&serde_json::Value>) -> Response {
+    let Some(receipt) = detail.and_then(|d| d.get("replacement")) else { return response; };
+    let (response, body) = read_json_response(response).await;
+    let Some(mut body) = body else { return response; };
+    body["replacement"] = receipt.clone();
+    let (mut parts, _) = response.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(body.to_string()))
 }
 
 /// The bridge shortcut to run for agent Do Not Disturb, when the feature is
@@ -29150,6 +29370,210 @@ mod tests {
             assert_eq!(keys.load(std::sync::atomic::Ordering::SeqCst), 3);
             runner.shutdown();
         });
+    }
+
+    /// How the fake bound field answers a guarded clear.
+    #[derive(Clone, Copy, PartialEq)]
+    enum FakeClear {
+        Ok,
+        /// Refused before deleting anything (`… nothing was sent`).
+        Refused,
+        /// Interrupted after deleting, leaving the field with this many of
+        /// its characters (`None` = all of them, i.e. nothing was deleted).
+        Interrupted(Option<usize>),
+    }
+
+    struct FakeField {
+        value: std::sync::Mutex<String>,
+        binds: std::sync::atomic::AtomicUsize,
+        clears: std::sync::atomic::AtomicUsize,
+        keys: std::sync::atomic::AtomicUsize,
+    }
+
+    /// A runner whose one text field (`FIELD`) supports the guarded,
+    /// selected-target replacement path. `clear(n)` answers the n-th clear;
+    /// `fail_keys` fails that keys request (1-based) after dispatch.
+    fn guarded_field_runner(
+        initial: &str,
+        clear: impl Fn(usize) -> FakeClear + Send + 'static,
+        fail_keys: Option<usize>,
+    ) -> (MockRunner, Arc<FakeField>) {
+        let field = Arc::new(FakeField {
+            value: std::sync::Mutex::new(initial.to_string()),
+            binds: 0.into(),
+            clears: 0.into(),
+            keys: 0.into(),
+        });
+        let seen = field.clone();
+        let error = |status: &str, code: &str, message: &str| {
+            let body = serde_json::json!({"value":{"error":code,"message":message}}).to_string();
+            format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        };
+        let runner = MockRunner::start(move |request| {
+            use std::sync::atomic::Ordering::SeqCst;
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+            if request.starts_with("POST /session ") {
+                return r#"{"value":{"sessionId":"S","capabilities":{"ipu:guardedInput":true,"ipu:selectedInputTarget":true,"ipu:valueRead":true}}}"#.into();
+            }
+            if request.contains("/ipu/element/FIELD/input-target") {
+                let n = seen.binds.fetch_add(1, SeqCst) + 1;
+                return format!(r#"{{"value":{{"token":"T{n}"}}}}"#);
+            }
+            if request.starts_with("GET ") && request.contains("/value?complete=1") {
+                let value = seen.value.lock().unwrap().clone();
+                return serde_json::json!({"value":{"complete":true,"value":value}}).to_string();
+            }
+            if request.starts_with("POST ") && request.contains("/clear") {
+                let n = seen.clears.fetch_add(1, SeqCst) + 1;
+                return match clear(n) {
+                    FakeClear::Ok => {
+                        seen.value.lock().unwrap().clear();
+                        r#"{"value":null}"#.into()
+                    }
+                    FakeClear::Refused => error("400 Bad Request", "invalid argument", "bound clear unavailable; nothing was sent"),
+                    FakeClear::Interrupted(left) => {
+                        if let Some(left) = left {
+                            let mut value = seen.value.lock().unwrap();
+                            *value = value.chars().take(left).collect();
+                        }
+                        error("500 Internal Server Error", "unknown error", "bound clear interrupted; deletion outcome unknown; inspect the original field")
+                    }
+                };
+            }
+            if request.starts_with("POST ") && request.contains("/wda/keys") {
+                let n = seen.keys.fetch_add(1, SeqCst) + 1;
+                let sent: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+                let text = sent["value"][0].as_str().unwrap_or_default().to_string();
+                if fail_keys == Some(n) {
+                    return error("500 Internal Server Error", "unknown error", "input target changed during typing; text outcome unknown; do not retry input");
+                }
+                seen.value.lock().unwrap().push_str(&text);
+                return r#"{"value":null}"#.into();
+            }
+            healthy_runner_responder(request)
+        });
+        (runner, field)
+    }
+
+    /// Run a guarded replacement of `FIELD` with `text`; the result and receipt.
+    fn run_guarded_replacement(
+        runner: &MockRunner,
+        text: &str,
+    ) -> (Result<(), SnapshotElementTapError>, serde_json::Value) {
+        block(async {
+            let mut client = crate::runner::RunnerClient::new(runner.base()).unwrap();
+            let target = client.input_target_for_element("FIELD", text).await.unwrap().expect("selected input target");
+            let mut receipt = ReplacementReceipt::new(text);
+            let result = guarded_replacement(&mut client, "FIELD", text, target, &|| true, &mut receipt).await;
+            let mut detail = None;
+            receipt.store(&mut detail);
+            (result, detail.unwrap()["replacement"].clone())
+        })
+    }
+
+    #[test]
+    fn a_guarded_replacement_reports_every_segment_it_delivered() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let text = "字".repeat(crate::text_input::CHUNK_CHARS * 2 + 50);
+        let (mut runner, field) = guarded_field_runner("old text", |_| FakeClear::Ok, None);
+        let (result, receipt) = run_guarded_replacement(&runner, &text);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*field.value.lock().unwrap(), text);
+        assert_eq!(receipt["phase"], "done");
+        assert_eq!(receipt["clear"]["status"], "cleared");
+        assert_eq!(receipt["segments_total"], 3);
+        assert_eq!(receipt["segments_delivered"], 3);
+        assert_eq!(receipt["characters_confirmed"], 450);
+        assert_eq!(receipt["characters_total"], 450);
+        assert!(receipt["stopped_at_segment"].is_null());
+        assert_eq!(field.keys.load(SeqCst), 3);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn a_guarded_replacement_that_fails_part_way_names_the_segment_it_stopped_at() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let text = "a".repeat(crate::text_input::CHUNK_CHARS * 2 + 50);
+        let (mut runner, field) = guarded_field_runner("old", |_| FakeClear::Ok, Some(2));
+        let (result, receipt) = run_guarded_replacement(&runner, &text);
+        assert!(matches!(result, Err(SnapshotElementTapError::AfterDispatch(_))), "{result:?}");
+        assert_eq!(receipt["phase"], "type");
+        assert_eq!(receipt["stopped_at_segment"], 2);
+        assert_eq!(receipt["segments_delivered"], 1);
+        assert_eq!(receipt["characters_confirmed"], 200);
+        assert_eq!(receipt["characters_uncertain"], 200);
+        let statuses: Vec<_> = receipt["segments"].as_array().unwrap().iter().map(|s| s["status"].clone()).collect();
+        assert_eq!(statuses, ["delivered", "uncertain", "not_sent"]);
+        // Nothing after the failed segment was sent.
+        assert_eq!(field.keys.load(SeqCst), 2);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn a_clear_that_lost_the_field_before_deleting_rebinds_and_clears_again() {
+        use std::sync::atomic::Ordering::SeqCst;
+        for first in [FakeClear::Refused, FakeClear::Interrupted(None)] {
+            let (mut runner, field) =
+                guarded_field_runner("old text", move |n| if n == 1 { first } else { FakeClear::Ok }, None);
+            let (result, receipt) = run_guarded_replacement(&runner, "new");
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(*field.value.lock().unwrap(), "new");
+            assert_eq!(receipt["clear"], serde_json::json!({"status":"recovered","field":"unchanged","rebound":true}));
+            assert_eq!(field.binds.load(SeqCst), 2, "bound once more");
+            assert_eq!(field.clears.load(SeqCst), 2);
+            runner.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_clear_interrupted_after_it_emptied_the_field_rebinds_without_clearing_again() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut runner, field) = guarded_field_runner("old text", |_| FakeClear::Interrupted(Some(0)), None);
+        let (result, receipt) = run_guarded_replacement(&runner, "new");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*field.value.lock().unwrap(), "new");
+        assert_eq!(receipt["clear"], serde_json::json!({"status":"recovered","field":"empty","rebound":true}));
+        assert_eq!(field.clears.load(SeqCst), 1);
+        assert_eq!(field.binds.load(SeqCst), 2);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn a_partly_cleared_field_stops_the_replacement_without_typing() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut runner, field) = guarded_field_runner("old text", |_| FakeClear::Interrupted(Some(3)), None);
+        let (result, receipt) = run_guarded_replacement(&runner, "new");
+        assert!(matches!(result, Err(SnapshotElementTapError::AfterDispatch(_))), "{result:?}");
+        assert_eq!(receipt["phase"], "clear");
+        assert_eq!(receipt["clear"]["status"], "failed");
+        assert_eq!(receipt["clear"]["field"], "partially_cleared");
+        assert_eq!(receipt["characters_confirmed"], 0);
+        assert_eq!(field.keys.load(SeqCst), 0);
+        assert_eq!(field.binds.load(SeqCst), 1, "never rebound");
+        runner.shutdown();
+    }
+
+    #[test]
+    fn a_clear_that_keeps_failing_leaves_the_field_unchanged_and_says_so() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut runner, field) = guarded_field_runner("old text", |_| FakeClear::Refused, None);
+        let (result, receipt) = run_guarded_replacement(&runner, "new");
+        assert!(matches!(result, Err(SnapshotElementTapError::NoEffect("replacement_not_applied", _))), "{result:?}");
+        assert_eq!(receipt["clear"]["status"], "failed");
+        assert_eq!(receipt["clear"]["field"], "unchanged");
+        assert_eq!(receipt["clear"]["attempts"], 2);
+        assert_eq!(*field.value.lock().unwrap(), "old text");
+        assert_eq!(field.keys.load(SeqCst), 0);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn cleared_field_state_compares_without_reporting_contents() {
+        assert_eq!(cleared_field_state(Some("abc"), Some("")), "empty");
+        assert_eq!(cleared_field_state(Some("abc"), Some("abc")), "unchanged");
+        assert_eq!(cleared_field_state(Some("abc"), Some("ab")), "partially_cleared");
+        assert_eq!(cleared_field_state(None, Some("ab")), "partially_cleared");
+        assert_eq!(cleared_field_state(Some("abc"), None), "unknown");
     }
 
     #[test]

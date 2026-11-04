@@ -3624,6 +3624,16 @@ fn shape_structured(mut result: CallToolResult, mode: StructuredMode) -> CallToo
                     if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
                     continue;
                 }
+                // How far a set_value replacement got (#399): its counts and
+                // where it stopped, without the per-segment list.
+                if key == "replacement" {
+                    let receipt: serde_json::Map<String, serde_json::Value> = ["phase", "segments_total", "segments_delivered",
+                        "characters_confirmed", "characters_uncertain", "characters_total", "stopped_at_segment"]
+                        .into_iter().filter_map(|name| value.get(name).filter(|field| !field.is_null())
+                            .map(|field| (name.to_string(), field.clone()))).collect();
+                    if !receipt.is_empty() { slim.insert(key.clone(), serde_json::Value::Object(receipt)); }
+                    continue;
+                }
                 if key == "system_capture" {
                     let receipt: serde_json::Map<String, serde_json::Value> = ["requested", "saved_verified"]
                         .into_iter().filter_map(|name| value.get(name).filter(|field| field.is_boolean())
@@ -6619,6 +6629,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_slim_structure_keeps_how_far_a_replacement_got() {
+        let mut result = CallToolResult::error(vec![Content::text("FAILED set_value")]);
+        result.structured_content = Some(serde_json::json!({
+            "ok": false,
+            "error": "outcome_unknown",
+            "replacement": {"path": "guarded", "phase": "type", "clear": {"status": "cleared"},
+                "segments_total": 3, "segments_delivered": 1, "characters_confirmed": 200,
+                "characters_uncertain": 200, "characters_total": 450, "stopped_at_segment": 2,
+                "segments": [{"segment": 1, "characters": 200, "status": "delivered"}]},
+        }));
+        let slim = shape_structured(result, StructuredMode::Slim).structured_content.unwrap();
+        assert_eq!(slim["replacement"], serde_json::json!({"phase": "type", "segments_total": 3,
+            "segments_delivered": 1, "characters_confirmed": 200, "characters_uncertain": 200,
+            "characters_total": 450, "stopped_at_segment": 2}));
     }
 
     #[test]
