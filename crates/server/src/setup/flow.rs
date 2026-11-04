@@ -1498,8 +1498,8 @@ impl Setup {
         sdk: Option<&str>,
         deployment_override: &str,
     ) -> String {
-        format!(
-            "{}|{}|{}",
+        let key = format!(
+            "{}|{}",
             runner::cache_key(
                 &self.ctx,
                 source_hash,
@@ -1512,8 +1512,15 @@ impl Setup {
                 &super::embed::cache_component(self.embed.as_ref()),
             ),
             icon::cache_component(self.icon_source.as_deref()),
-            runner_files::cache_component(self.runner_files),
-        )
+        );
+        // Off is the default: its key stays what it was before Files sharing
+        // existed, so an upgrade reuses every cached runner instead of
+        // rebuilding it (and asking for the passcode) on each phone.
+        if self.runner_files {
+            format!("{key}|{}", runner_files::cache_component(true))
+        } else {
+            key
+        }
     }
 
     /// Wait for the build lock: a post-upgrade prebuild may be building this
