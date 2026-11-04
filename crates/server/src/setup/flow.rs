@@ -5221,11 +5221,9 @@ fn legacy_record_for(ctx: &Ctx) -> Option<legacy_ios::Record> {
 }
 
 /// Clear old runner launch logs out of Xcode's DerivedData (see
-/// [`runner::sweep_runner_launch_logs`]) before a launch adds one more.
+/// [`runner::sweep_launch_logs_now`]) before a launch adds one more.
 fn sweep_launch_logs() {
-    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else { return };
-    let derived = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
-    let (removed, freed) = runner::sweep_runner_launch_logs(&derived, Duration::from_secs(600), 3);
+    let (removed, freed) = runner::sweep_launch_logs_now();
     if removed > 0 {
         info(&format!(
             "removed {removed} old device runner launch logs from Xcode DerivedData ({} MB)",
