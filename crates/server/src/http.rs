@@ -7984,14 +7984,26 @@ async fn set_value_snapshot_element(
             set_value_readback_verification(detail, now, &text);
             Ok(())
         },
+        // A long value read back as its own beginning: the accessibility value
+        // is capped (Notes stops at 512 characters), not the field. Typed and
+        // changed, so not "no effect" — but not proven whole either.
+        (Ok(()), Some(now)) if readback_truncated(now, &text) => {
+            set_value_verification(detail, false, "readback_truncated");
+            Ok(())
+        }
         // The write failed and the field still holds what it held: not applied.
         (Err(_), Some(now)) if before.as_deref().is_some_and(|was| was == now) => Err(
             SnapshotElementTapError::NoEffect("value_not_applied", SET_VALUE_NOT_APPLIED_HINT),
         ),
-        (Ok(()), Some(_)) => Err(SnapshotElementTapError::NoEffect(
-            "value_not_applied",
-            SET_VALUE_NOT_APPLIED_HINT,
-        )),
+        // Acknowledged, yet the field reads as it did: not applied.
+        (Ok(()), Some(now)) if before.as_deref().is_none_or(|was| was == now) => Err(
+            SnapshotElementTapError::NoEffect("value_not_applied", SET_VALUE_NOT_APPLIED_HINT),
+        ),
+        // The field changed into something else: text reached it, so this is
+        // not safe to type again — inspect the field first.
+        (Ok(()), Some(_)) => Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!(
+            "set_value: the field changed but does not read back as the requested value; inspect it before typing again"
+        ))),
         // No readback: keep the dispatch outcome as runner reported it.
         _ => typed.map_err(set_value_dispatch_error),
     }
@@ -8229,6 +8241,12 @@ fn set_value_dispatch_error(error: anyhow::Error) -> SnapshotElementTapError {
 /// separators the caller did not type (a phone field that shows 090-1234-5678
 /// for 09012345678, an amount field that shows 1,000). A character the caller
 /// typed is never ignored, so "1.5" vs "15" or "-5" vs "5" stay different.
+/// A readback that is a long, strict beginning of the value: a capped
+/// accessibility value, not a field that kept its old contents.
+fn readback_truncated(read_back: &str, wanted: &str) -> bool {
+    read_back.chars().count() >= 256 && read_back.len() < wanted.len() && wanted.starts_with(read_back)
+}
+
 fn same_text(read_back: &str, wanted: &str) -> bool {
     const FIELD_FORMATTING: &[char] = &[' ', '\u{3000}', '-', ',', '/', '(', ')', '・'];
     let added = |c: &char| FIELD_FORMATTING.contains(c) && !wanted.contains(*c);
@@ -22930,6 +22948,15 @@ mod tests {
         assert!(setup_retry_json(dir.path(), None, now).is_null());
         // A schedule long past its time: the supervisor is not coming back.
         assert!(setup_retry_json(dir.path(), Some("prereq-fail"), now + 6 + SETUP_RETRY_GRACE_SECS).is_null());
+    }
+
+    #[test]
+    fn a_capped_readback_of_a_long_value_is_truncated_not_unapplied() {
+        let long = "word ".repeat(130);
+        assert!(readback_truncated(&long[..512], &long));
+        assert!(!readback_truncated(&long, &long), "a full readback is a match, not a truncation");
+        assert!(!readback_truncated("word word", &long), "a short prefix proves nothing");
+        assert!(!readback_truncated(&"x".repeat(600)[..512], &long));
     }
 
     #[test]
