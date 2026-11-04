@@ -449,9 +449,15 @@ pub fn app_notes(json: &Value) -> Option<String> {
 /// nor an OCR error.
 pub fn ocr_block(json: &Value) -> Option<String> {
     if let Some(error) = text(json, "ocr_error") {
+        let retry = json
+            .get("ocr_retry_after_ms")
+            .and_then(Value::as_u64)
+            .map(|ms| format!("; retry phone_elements(ocr) in ~{} s", ms.div_ceil(1000)))
+            .unwrap_or_default();
+        let status = text(json, "ocr_status").unwrap_or_else(|| "failed".to_string());
         return Some(format!(
-            "ocr_error: {} (the element list above is still the answer)",
-            clip(&error, 300)
+            "ocr_error ({status}{retry}): {} (the element list above is still the answer)",
+            clip(&error, 400)
         ));
     }
     let ocr = json.get("ocr")?;
@@ -674,7 +680,10 @@ mod tests {
         .unwrap();
         assert!(text.contains("\"Start\" x=0.500 y=0.400 (0.98)"), "{text}");
         let failed = ocr_block(&json!({"elements": [], "ocr_error": "vision helper missing"})).unwrap();
-        assert!(failed.starts_with("ocr_error: vision helper missing"), "{failed}");
+        assert!(failed.starts_with("ocr_error (failed): vision helper missing"), "{failed}");
+        let warming = ocr_block(&json!({"elements": [], "ocr_error": "warming up",
+            "ocr_status": "warming", "ocr_retry_after_ms": 15000})).unwrap();
+        assert!(warming.starts_with("ocr_error (warming; retry phone_elements(ocr) in ~15 s): warming up"), "{warming}");
         assert!(ocr_block(&json!({"elements": []})).is_none());
     }
 }

@@ -2872,6 +2872,18 @@ async fn agent_status(
         || setup_in_flight(&crate::instance::current().state_dir),
     );
     let reconnecting = reconnecting || setup_working.is_some();
+    // The KeepAlive supervisor's next automatic attempt after a failed setup
+    // round (#403): a blocker it is about to retry may clear without anyone
+    // touching the phone, so a waiting caller must not treat it as final.
+    let setup_retry = if state.managed_runner && !runner_actionable && !releasing {
+        setup_retry_json(
+            &crate::instance::current().state_dir,
+            setup_status.as_ref().map(|status| status.phase.as_str()),
+            crate::setup::retry::now(),
+        )
+    } else {
+        serde_json::Value::Null
+    };
     // Death attribution (#26 §2). Only meaningful while runner is actually down;
     // a stale cause next to a healthy runner would read as a live problem.
     let death = *recover(state.runner_death.lock());
@@ -2964,6 +2976,13 @@ async fn agent_status(
     // Hints name commands and ports for the default instance; a second
     // phone has its own relay ports and needs `--instance NAME`.
     let hint = hint_for_this_daemon(hint, crate::instance::current(), &relay_ports_label());
+    let hint = match setup_retry.get("next_in_secs").and_then(serde_json::Value::as_u64) {
+        Some(secs) if advice == "blocker" => format!(
+            "{hint} — the supervisor retries on its own in {secs}s (attempt {}); wait for that retry before asking a person to act",
+            setup_retry["attempt"]
+        ),
+        _ => hint.to_string(),
+    };
     let hint_json = serde_json::to_string(&hint).unwrap_or_else(|_| "\"\"".into());
     let recovery = setup_recovery(advice, &setup_blocked_on);
     let next_step_json = human_next_step(advice, &setup_blocked_on, runner_died_reason)
@@ -3068,7 +3087,7 @@ async fn agent_status(
     // The daemon inside the runner on the phone, as its last /status said.
     let phone_daemon = crate::phone_daemon::status_json(runner);
     let body = format!(
-        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
+        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_retry":{setup_retry},"setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&status_udid).unwrap_or_else(|_| "null".into()),
         {
@@ -4236,6 +4255,28 @@ fn setup_owner_alive(pid: u32, owner_start: &str) -> bool {
 /// Kept in one place because the daemon must clear exactly this file — and
 /// nothing else — when a caller explicitly asks for the phone.
 const RUNNER_RETRY_STATE_FILE: &str = "runner-retry-state.v1";
+
+/// How long after its scheduled time a retry still counts as pending: the
+/// supervisor relaunches through launchd and checks the phone before it
+/// rewrites the setup status.
+const SETUP_RETRY_GRACE_SECS: u64 = 30;
+
+/// `{kind, attempt, next_in_secs}` while a failed setup round has an automatic
+/// retry scheduled, else null. Only a finished, failed round counts: while a
+/// round runs, `reconnecting` already says the daemon is working.
+fn setup_retry_json(state_dir: &std::path::Path, phase: Option<&str>, now: u64) -> serde_json::Value {
+    if state_dir.as_os_str().is_empty() || !phase.is_some_and(|phase| phase.ends_with("-fail") || phase == "waiting" || phase == "lock-backoff") {
+        return serde_json::Value::Null;
+    }
+    match crate::setup::retry::read(&state_dir.join(RUNNER_RETRY_STATE_FILE)) {
+        Ok(Some(retry)) if retry.next_at.saturating_add(SETUP_RETRY_GRACE_SECS) >= now => serde_json::json!({
+            "kind": retry.kind.name(),
+            "attempt": retry.attempt,
+            "next_in_secs": retry.next_at.saturating_sub(now),
+        }),
+        _ => serde_json::Value::Null,
+    }
+}
 
 /// Drop the supervisor's persisted retry backoff.
 ///
@@ -17199,8 +17240,9 @@ async fn agent_elements_unfenced(
     // Before the scope: whether the tree is usable is judged on all of it.
     if let Ok(Some(mode)) = ocr_mode {
         if mode == OcrMode::Force || crate::scope::needs_image(&json) {
+            let started = std::time::Instant::now();
             let result = elements_ocr(&state, &headers, &json).await;
-            attach_ocr(&mut json, result);
+            attach_ocr(&mut json, result, started);
         }
     }
     if let Some(scope) = scope.as_deref().filter(|scope| *scope != "changed") {
@@ -22427,9 +22469,37 @@ fn parse_ocr_mode(raw: Option<&str>) -> Result<Option<OcrMode>, serde_json::Valu
     }
 }
 
-/// A recognition run's budget, the screenshot excluded. The first run on a
-/// Mac compiles the helper and may not fit; the next read then works.
-const ELEMENTS_OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long a read waits for recognition, the screenshot excluded. A warm
+/// run takes well under a second; the first run after Vision sat idle can
+/// take 20–46 s (#404). The read does not hold the whole observation for
+/// that: it returns at this budget with `ocr_status: "warming"` while the
+/// detached run keeps loading the models, and a retry then reads fast.
+const ELEMENTS_OCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// When to retry after a read stopped waiting for a cold recognition.
+const OCR_WARMING_RETRY_MS: u64 = 15_000;
+
+/// Why a read carries no OCR rows.
+#[derive(Debug)]
+struct OcrFailure {
+    message: String,
+    /// `warming` (this read's run outlived the wait and keeps going), `busy`
+    /// (an earlier run is still going) or `failed`.
+    status: &'static str,
+    retry_after_ms: Option<u64>,
+}
+
+impl From<String> for OcrFailure {
+    fn from(message: String) -> Self {
+        OcrFailure { message, status: "failed", retry_after_ms: None }
+    }
+}
+
+impl From<&str> for OcrFailure {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
 
 /// A PNG's width from its header.
 fn png_width(bytes: &[u8]) -> Option<u32> {
@@ -22442,14 +22512,18 @@ async fn elements_ocr(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     json: &serde_json::Value,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<serde_json::Value>, OcrFailure> {
     let width = json
         .get("screen")
         .and_then(|screen| screen.get("width"))
         .and_then(serde_json::Value::as_f64)
         .filter(|width| *width > 0.0)
         .ok_or("the screen size is unknown, so recognized text cannot be placed")?;
-    let reservation = crate::ocr::reserve_background().map_err(|error| format!("{error:#}"))?;
+    let reservation = crate::ocr::reserve_background().map_err(|error| OcrFailure {
+        message: format!("{error:#}"),
+        status: "busy",
+        retry_after_ms: Some(5_000),
+    })?;
     let shot = agent_screenshot_capture(
         State(state.clone()),
         headers.clone(),
@@ -22462,14 +22536,14 @@ async fn elements_ocr(
     )
     .await;
     if !shot.status().is_success() {
-        return Err(format!("the screenshot for OCR failed ({})", shot.status()));
+        return Err(format!("the screenshot for OCR failed ({})", shot.status()).into());
     }
     if shot
         .headers()
         .get("x-capture-redacted")
         .is_some_and(|v| v.as_bytes() == b"1")
     {
-        return Err("the app hides this screen from capture; there is no text to read".to_string());
+        return Err("the app hides this screen from capture; there is no text to read".into());
     }
     let png = axum::body::to_bytes(shot.into_body(), 64 << 20)
         .await
@@ -22481,18 +22555,28 @@ async fn elements_ocr(
     let task = crate::ocr::recognize_background(reservation, png.to_vec(), scale);
     let rows = tokio::time::timeout(ELEMENTS_OCR_TIMEOUT, task)
         .await
-        .map_err(|_| {
-            format!(
-                "OCR did not finish in {} s (the first run after Vision was idle can be slow; retry)",
-                ELEMENTS_OCR_TIMEOUT.as_secs()
-            )
+        .map_err(|_| OcrFailure {
+            message: format!(
+                "OCR is warming up: Vision had not finished after {} s, which happens on the first run after it sat idle. The tree and any screenshot in this read are current; the recognition keeps running, so retry the read in about {} s",
+                ELEMENTS_OCR_TIMEOUT.as_secs(),
+                OCR_WARMING_RETRY_MS / 1000
+            ),
+            status: "warming",
+            retry_after_ms: Some(OCR_WARMING_RETRY_MS),
         })?
         .map_err(|error| format!("{error:#}"))?;
     Ok(crate::ocr::rows_for_elements(&rows))
 }
 
-/// `ocr: {rows, source}` or `ocr_error`; never fails the read.
-fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value>, String>) {
+/// `ocr: {rows, source}` or `ocr_error` + `ocr_status` (+ `ocr_retry_after_ms`
+/// when a retry will work); never fails the read. `ocr_ms` is the time OCR
+/// added to this read, kept apart from the tree and screenshot.
+fn attach_ocr<E: Into<OcrFailure>>(
+    json: &mut serde_json::Value,
+    result: Result<Vec<serde_json::Value>, E>,
+    started: std::time::Instant,
+) {
+    json["ocr_ms"] = serde_json::json!(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
     match result {
         Ok(rows) => {
             json["ocr"] = serde_json::json!({
@@ -22502,13 +22586,36 @@ fn attach_ocr(json: &mut serde_json::Value, result: Result<Vec<serde_json::Value
             });
         }
         Err(error) => {
-            json["ocr_error"] = serde_json::Value::String(error);
+            let error = error.into();
+            json["ocr_error"] = serde_json::Value::String(error.message);
+            json["ocr_status"] = serde_json::Value::from(error.status);
+            if let Some(ms) = error.retry_after_ms {
+                json["ocr_retry_after_ms"] = serde_json::json!(ms);
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn setup_retry_reports_a_scheduled_supervisor_retry_only_after_a_failed_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNNER_RETRY_STATE_FILE);
+        assert!(setup_retry_json(dir.path(), Some("prereq-fail"), 100).is_null(), "no state, no retry");
+        crate::setup::retry::record_failure(&path, crate::setup::retry::Kind::Generic).unwrap();
+        let now = crate::setup::retry::now();
+        let retry = setup_retry_json(dir.path(), Some("prereq-fail"), now);
+        assert_eq!(retry["kind"], "generic");
+        assert_eq!(retry["attempt"], 1);
+        assert!(retry["next_in_secs"].as_u64().unwrap() <= 5, "{retry}");
+        // A round in progress is `reconnecting`, not a scheduled retry.
+        assert!(setup_retry_json(dir.path(), Some("building"), now).is_null());
+        assert!(setup_retry_json(dir.path(), None, now).is_null());
+        // A schedule long past its time: the supervisor is not coming back.
+        assert!(setup_retry_json(dir.path(), Some("prereq-fail"), now + 6 + SETUP_RETRY_GRACE_SECS).is_null());
+    }
+
     #[test]
     fn history_activity_is_fenced_against_late_private_hold() {
         use tower::ServiceExt;
@@ -30384,9 +30491,17 @@ mod tests {
         assert_eq!(parse_ocr_mode(Some("always")).unwrap_err()["error"], "invalid_ocr");
 
         let mut json = serde_json::json!({"elements": []});
-        attach_ocr(&mut json, Err("OCR needs macOS".to_string()));
+        let now = std::time::Instant::now();
+        attach_ocr(&mut json, Err("OCR needs macOS".to_string()), now);
         assert_eq!(json["ocr_error"], "OCR needs macOS");
-        attach_ocr(&mut json, Ok(vec![serde_json::json!({"kind":"OCRText"})]));
+        assert_eq!(json["ocr_status"], "failed");
+        assert!(json.get("ocr_retry_after_ms").is_none());
+        assert!(json["ocr_ms"].is_u64());
+        let mut warming = serde_json::json!({"elements": []});
+        attach_ocr(&mut warming, Err(OcrFailure { message: "warming".into(), status: "warming", retry_after_ms: Some(OCR_WARMING_RETRY_MS) }), now);
+        assert_eq!(warming["ocr_status"], "warming");
+        assert_eq!(warming["ocr_retry_after_ms"], OCR_WARMING_RETRY_MS);
+        attach_ocr(&mut json, Ok::<_, String>(vec![serde_json::json!({"kind":"OCRText"})]), now);
         assert_eq!(json["ocr"]["source"], "vision");
         assert_eq!(json["ocr"]["rows"][0]["kind"], "OCRText");
 

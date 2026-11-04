@@ -76,9 +76,25 @@ pub struct RecognitionReservation {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
+/// When the running background recognition started (ms since the epoch), or 0.
+static BACKGROUND_STARTED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long the background recognition in flight has been running, if one is.
+/// A run that outlived its caller is usually Vision loading its models after
+/// idle; it ends on its own and the next read is fast.
+pub fn busy_for() -> Option<Duration> {
+    let started = BACKGROUND_STARTED_MS.load(std::sync::atomic::Ordering::Acquire);
+    (started > 0).then(|| Duration::from_millis(crate::metrics::now_ms().saturating_sub(started)))
+}
+
 fn reserve_on(lane: &std::sync::Arc<tokio::sync::Semaphore>) -> Result<RecognitionReservation> {
-    let permit = lane.clone().try_acquire_owned()
-        .map_err(|_| anyhow::anyhow!("OCR is already recognizing a screen; retry a fresh read after the current run finishes"))?;
+    let permit = lane.clone().try_acquire_owned().map_err(|_| match busy_for() {
+        Some(running) => anyhow::anyhow!(
+            "OCR is already recognizing a screen ({} s so far: after sitting idle Vision loads its models first); retry a fresh read in a few seconds",
+            running.as_secs()
+        ),
+        None => anyhow::anyhow!("OCR is already recognizing a screen; retry a fresh read after the current run finishes"),
+    })?;
     Ok(RecognitionReservation { _permit: permit })
 }
 
@@ -94,7 +110,17 @@ where
     T: Send + 'static,
 {
     tokio::spawn(async move {
+        // Declared after the reservation, so it drops first: the start time
+        // is cleared before the lane opens, even when the work panics.
+        struct Running;
+        impl Drop for Running {
+            fn drop(&mut self) {
+                BACKGROUND_STARTED_MS.store(0, std::sync::atomic::Ordering::Release);
+            }
+        }
         let _reservation = reservation;
+        let _running = Running;
+        BACKGROUND_STARTED_MS.store(crate::metrics::now_ms().max(1), std::sync::atomic::Ordering::Release);
         work.await
     })
     .await
