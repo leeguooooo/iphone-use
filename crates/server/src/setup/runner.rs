@@ -85,8 +85,15 @@ pub fn test_diagnostics_wanted() -> bool {
 /// ones that hold nothing but such logs and have not changed for `idle`,
 /// keeping the newest `keep`. A directory with anything else in it — a build
 /// of the runner project opened in Xcode — is never touched.
+/// A directory touched at or after `busy_since` (the start of the oldest
+/// xcodebuild still running) may belong to a live launch and stays too.
 /// Returns (removed, bytes freed).
-pub fn sweep_runner_launch_logs(derived_data: &Path, idle: std::time::Duration, keep: usize) -> (usize, u64) {
+pub fn sweep_runner_launch_logs(
+    derived_data: &Path,
+    idle: std::time::Duration,
+    keep: usize,
+    busy_since: Option<std::time::SystemTime>,
+) -> (usize, u64) {
     let Ok(entries) = std::fs::read_dir(derived_data) else { return (0, 0) };
     let now = std::time::SystemTime::now();
     let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
@@ -101,7 +108,7 @@ pub fn sweep_runner_launch_logs(derived_data: &Path, idle: std::time::Duration, 
     let mut removed = 0;
     let mut freed = 0;
     for (modified, dir) in candidates.into_iter().skip(keep) {
-        if now.duration_since(modified).unwrap_or_default() < idle {
+        if now.duration_since(modified).unwrap_or_default() < idle || busy_since.is_some_and(|t| modified >= t) {
             continue;
         }
         let bytes = tree_bytes(&dir);
@@ -113,7 +120,83 @@ pub fn sweep_runner_launch_logs(derived_data: &Path, idle: std::time::Duration, 
     (removed, freed)
 }
 
-/// `dir` holds only `Logs/`; `Logs` holds `Test` plus the empty `Build`,
+/// Sweeps the current user's DerivedData (see [`sweep_runner_launch_logs`]):
+/// before each runner launch, when the daemon starts — so an upgrade clears
+/// what older versions left without waiting for a launch — and every few
+/// hours while it runs. Launch logs of any xcodebuild still running are left
+/// alone. Returns (removed, bytes freed).
+pub fn sweep_launch_logs_now() -> (usize, u64) {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else { return (0, 0) };
+    let derived = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
+    if !derived.is_dir() {
+        return (0, 0);
+    }
+    // Without the process list a running xcodebuild cannot be ruled out.
+    let Some(ps) = ps_elapsed_commands() else { return (0, 0) };
+    let busy_since = oldest_xcodebuild_start(&ps);
+    sweep_runner_launch_logs(&derived, std::time::Duration::from_secs(600), 3, busy_since)
+}
+
+/// `ps -o etime=,command=` for this user's processes: elapsed time and
+/// command line. `None` when `ps` cannot run or fails.
+fn ps_elapsed_commands() -> Option<String> {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let out = std::process::Command::new("ps")
+        .env("LC_ALL", "C")
+        .args(["-xww", "-U", uid.as_str(), "-o", "etime=,command="])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// When the oldest running xcodebuild started (a minute early, for clock and
+/// ps rounding), from `ps -o etime=,command=` output. `None` when none runs.
+fn oldest_xcodebuild_start(ps: &str) -> Option<std::time::SystemTime> {
+    let oldest = ps
+        .lines()
+        .filter_map(|line| {
+            let (etime, command) = line.trim_start().split_once(char::is_whitespace)?;
+            runs_xcodebuild(command.trim_start()).then(|| parse_etime(etime))?
+        })
+        .max()?;
+    std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(oldest + 60))
+}
+
+/// The command's program is `xcodebuild`. The path may hold spaces
+/// (`/Applications/Xcode 16.app/…/xcodebuild`), so the program is everything
+/// up to the first `xcodebuild` that starts the line or follows a `/` and is
+/// followed by a space or the end.
+fn runs_xcodebuild(command: &str) -> bool {
+    command.match_indices("xcodebuild").any(|(i, word)| {
+        let before = &command[..i];
+        let after = &command[i + word.len()..];
+        (before.is_empty() || (before.ends_with('/') && !before.contains(" -")))
+            && (after.is_empty() || after.starts_with(char::is_whitespace))
+    })
+}
+
+/// `ps` etime, `[[dd-]hh:]mm:ss`, in seconds.
+fn parse_etime(etime: &str) -> Option<u64> {
+    let (days, clock) = match etime.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, etime),
+    };
+    let mut secs = 0u64;
+    let parts: Vec<&str> = clock.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return None;
+    }
+    for part in parts {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86_400 + secs)
+}
+
+/// `dir` holds only `Logs/` (and older Xcodes' `TestResults/metadata.db`);
+/// `Logs` holds `Test` plus the empty `Build`,
 /// `Launch`, `Package`… folders xcodebuild creates for every action; and
 /// `Logs/Test` only the runner's result bundles
 /// (`Test-IPhoneUseRunner-*.xcresult`) and their bookkeeping. A build of the
@@ -123,7 +206,20 @@ fn only_runner_launch_logs(dir: &Path) -> bool {
         Some(std::fs::read_dir(path).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
     };
     let Some(top) = names(dir) else { return false };
-    if top.iter().any(|name| name != "Logs" && name != ".DS_Store") || !top.iter().any(|n| n == "Logs") {
+    let test_results_only_index = || {
+        std::fs::read_dir(dir.join("TestResults")).is_ok_and(|entries| {
+            entries.flatten().all(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name == ".DS_Store" || (name.starts_with("metadata.db") && e.file_type().is_ok_and(|t| t.is_file()))
+            })
+        })
+    };
+    if top.iter().any(|name| match name.as_str() {
+        "Logs" | ".DS_Store" => false,
+        "TestResults" => !test_results_only_index(),
+        _ => true,
+    }) || !top.iter().any(|n| n == "Logs")
+    {
         return false;
     }
     let logs = dir.join("Logs");
@@ -1051,8 +1147,8 @@ mod tests {
         std::fs::write(root.path().join("IPhoneUseRunner-built/Logs/Build/x.xcactivitylog"), b"log").unwrap();
         make("SomeOtherApp-abc", None);
         // Nothing idle long enough yet: a launch in progress is never removed.
-        assert_eq!(sweep_runner_launch_logs(root.path(), std::time::Duration::from_secs(600), 3), (0, 0));
-        let (removed, freed) = sweep_runner_launch_logs(root.path(), std::time::Duration::ZERO, 3);
+        assert_eq!(sweep_runner_launch_logs(root.path(), std::time::Duration::from_secs(600), 3, None), (0, 0));
+        let (removed, freed) = sweep_runner_launch_logs(root.path(), std::time::Duration::ZERO, 3, None);
         assert_eq!(removed, 3, "six launch dirs, three kept");
         assert!(freed >= 2000);
         let left: Vec<String> = std::fs::read_dir(root.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -1060,7 +1156,63 @@ mod tests {
         assert!(left.contains(&"IPhoneUseRunner-built".to_string()), "Logs/Build with a build log is not ours to clean");
         assert!(left.contains(&"SomeOtherApp-abc".to_string()));
         assert_eq!(left.iter().filter(|n| n.starts_with("IPhoneUseRunner-launch")).count(), 3);
-        assert_eq!(sweep_runner_launch_logs(&root.path().join("missing"), std::time::Duration::ZERO, 0), (0, 0));
+        assert_eq!(sweep_runner_launch_logs(&root.path().join("missing"), std::time::Duration::ZERO, 0, None), (0, 0));
+    }
+
+    #[test]
+    fn sweep_spares_launches_of_a_running_xcodebuild_and_takes_old_test_results() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["IPhoneUseRunner-old", "IPhoneUseRunner-live"] {
+            let test = root.path().join(name).join("Logs/Test");
+            std::fs::create_dir_all(&test).unwrap();
+            std::fs::write(test.join("LogStoreManifest.plist"), b"x").unwrap();
+        }
+        let results = root.path().join("IPhoneUseRunner-old/TestResults");
+        std::fs::create_dir_all(&results).unwrap();
+        std::fs::write(results.join("metadata.db"), b"x").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for file in ["IPhoneUseRunner-old/Logs/Test/LogStoreManifest.plist", "IPhoneUseRunner-old/TestResults/metadata.db"] {
+            std::fs::File::options().write(true).open(root.path().join(file)).unwrap().set_modified(old).unwrap();
+        }
+        for dir in ["IPhoneUseRunner-old/Logs/Test", "IPhoneUseRunner-old/Logs", "IPhoneUseRunner-old/TestResults", "IPhoneUseRunner-old"] {
+            std::fs::File::open(root.path().join(dir)).unwrap().set_modified(old).unwrap();
+        }
+        let busy = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(3600));
+        let (removed, _) = sweep_runner_launch_logs(root.path(), std::time::Duration::ZERO, 0, busy);
+        assert_eq!(removed, 1);
+        assert!(!root.path().join("IPhoneUseRunner-old").exists(), "TestResults with only its index is a launch leftover");
+        assert!(root.path().join("IPhoneUseRunner-live").exists(), "a running xcodebuild's launch stays");
+        // Something else in TestResults is not ours.
+        let other = root.path().join("IPhoneUseRunner-other");
+        std::fs::create_dir_all(other.join("Logs/Test")).unwrap();
+        std::fs::create_dir_all(other.join("TestResults/Attachments")).unwrap();
+        assert!(!only_runner_launch_logs(&other));
+        // Nor is a directory that merely carries the index's name.
+        let named = root.path().join("IPhoneUseRunner-named");
+        std::fs::create_dir_all(named.join("Logs/Test")).unwrap();
+        std::fs::create_dir_all(named.join("TestResults/metadata.db-dir")).unwrap();
+        assert!(!only_runner_launch_logs(&named));
+    }
+
+    #[test]
+    fn oldest_xcodebuild_start_reads_ps_etime() {
+        assert_eq!(parse_etime("05:07"), Some(307));
+        assert_eq!(parse_etime("01:00:00"), Some(3600));
+        assert_eq!(parse_etime("2-01:00:00"), Some(2 * 86_400 + 3600));
+        assert_eq!(parse_etime("garbage"), None);
+        let ps = "  10:00 /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -destination x test-without-building\n\
+                  1-00:00:00 /usr/bin/xcodebuild-helper\n\
+                  20:00 /bin/zsh -c xcodebuild\n\
+                  00:30 xcodebuild build\n";
+        let since = oldest_xcodebuild_start(ps).unwrap();
+        let ago = std::time::SystemTime::now().duration_since(since).unwrap().as_secs();
+        assert!((659..=662).contains(&ago), "oldest is the 10-minute xcodebuild plus a minute: {ago}");
+        assert_eq!(oldest_xcodebuild_start("  00:01 /bin/sleep 5\n"), None);
+        assert!(runs_xcodebuild("/Applications/Xcode 16.app/Contents/Developer/usr/bin/xcodebuild -destination x"));
+        assert!(runs_xcodebuild("xcodebuild"));
+        assert!(!runs_xcodebuild("/bin/zsh -c xcodebuild"));
+        assert!(!runs_xcodebuild("/usr/bin/grep -e /xcodebuild x"));
+        assert!(!runs_xcodebuild("/usr/bin/xcodebuild-helper"));
     }
 
     #[test]

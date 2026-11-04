@@ -1329,6 +1329,28 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             false,
         );
 
+        // Old runner launch logs in Xcode's DerivedData (#402): cleared soon
+        // after start — an upgrade restarts the daemon, so what older versions
+        // left goes without waiting for a runner launch — then every 6 hours.
+        if let Err(error) = std::thread::Builder::new()
+            .name("launch-log-sweep".into())
+            .spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(90));
+                loop {
+                    let (removed, freed) = server::setup::runner::sweep_launch_logs_now();
+                    if removed > 0 {
+                        tracing::info!(
+                            "removed {removed} old device runner launch logs from Xcode DerivedData ({} MB)",
+                            freed / (1024 * 1024)
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                }
+            })
+        {
+            tracing::warn!("launch-log sweep not started: {error:#}");
+        }
+
         // Idle auto-release owns only the local supervisor. Remote runner
         // endpoints are externally managed and must never trigger local
         // launchctl/setup commands.
