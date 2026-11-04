@@ -2052,7 +2052,9 @@ impl Setup {
     fn launch(&mut self, xcodebuild: &Path, xctestrun: &Path, from_cache: bool) -> Step<String> {
         let probe = checks::on_usb(&self.ctx.udid, &checks::usb_udids());
         let previous_session = if probe { self.runner_session() } else { None };
-        let Ok(argv) = runner::runner_argv(&self.ctx, &self.ctx.udid, xctestrun) else {
+        let no_diagnostics = !runner::test_diagnostics_wanted() && xcodebuild_has_no_diagnostics(xcodebuild);
+        sweep_launch_logs();
+        let Ok(argv) = runner::runner_argv(&self.ctx, &self.ctx.udid, xctestrun, no_diagnostics) else {
             return die("could not prepare the device runner launch arguments");
         };
         let command = format!("{} {}", xcodebuild.display(), argv.join(" "));
@@ -4762,6 +4764,11 @@ impl Setup {
         };
         let path = std::fs::canonicalize(&binary).unwrap_or(binary);
         pairs.push(("IPHONE_USE_SETUP_BIN", path.to_string_lossy().into_owned()));
+        // launchd does not inherit the shell: an opt-in made at setup must
+        // reach the supervisor that launches the runner.
+        if runner::test_diagnostics_wanted() {
+            pairs.push(("IPU_RUNNER_TEST_DIAGNOSTICS", "1".into()));
+        }
         if ctx.runner_src != ctx.runner_default_src {
             pairs.push((
                 "IPU_RUNNER_SRC",
@@ -5211,6 +5218,45 @@ fn legacy_record_for(ctx: &Ctx) -> Option<legacy_ios::Record> {
     legacy_ios::read_record(ctx.state_dir()).filter(|r| {
         crate::usbmux::normalize_udid(&r.udid) == crate::usbmux::normalize_udid(&ctx.udid)
     })
+}
+
+/// Clear old runner launch logs out of Xcode's DerivedData (see
+/// [`runner::sweep_runner_launch_logs`]) before a launch adds one more.
+fn sweep_launch_logs() {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else { return };
+    let derived = Path::new(&home).join("Library/Developer/Xcode/DerivedData");
+    let (removed, freed) = runner::sweep_runner_launch_logs(&derived, Duration::from_secs(600), 3);
+    if removed > 0 {
+        info(&format!(
+            "removed {removed} old device runner launch logs from Xcode DerivedData ({} MB)",
+            freed / (1024 * 1024)
+        ));
+    }
+}
+
+/// Whether `xcodebuild` takes `-collect-test-diagnostics` (see
+/// [`runner::NO_TEST_DIAGNOSTICS`]). Asked once per supervisor run and
+/// xcodebuild; an xcodebuild whose `-help` cannot be read is treated as
+/// lacking it, so the launch keeps working on any Xcode.
+fn xcodebuild_has_no_diagnostics(xcodebuild: &Path) -> bool {
+    static CACHE: std::sync::Mutex<Option<(PathBuf, bool)>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((path, supported)) = cache.as_ref() {
+        if path == xcodebuild {
+            return *supported;
+        }
+    }
+    let supported = std::process::Command::new(xcodebuild)
+        .arg("-help")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|out| {
+            runner::supports_no_test_diagnostics(&String::from_utf8_lossy(&out.stdout))
+                || runner::supports_no_test_diagnostics(&String::from_utf8_lossy(&out.stderr))
+        });
+    *cache = Some((xcodebuild.to_path_buf(), supported));
+    supported
 }
 
 /// This phone has run on the legacy path and its lockdownd answers on its
