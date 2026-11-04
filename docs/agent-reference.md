@@ -124,6 +124,20 @@ recordVideo`: its status and summary carry `"via":"simctl"` and no `frames`, `wi
 simulator is still booting and `shutdown` when it is off; wait, or run `iphone-use
 simulator start` again.
 
+**Task end and reconnect on use.** `POST /agent/owner {"release":true}`
+(`phone_release_owner`) ends the task and the daemon stops the device runner
+right away — on a passcode phone too — so the phone leaves automation mode
+between tasks; a lease that lapses without a release counts as a task end as
+well. `IPHONE_USE_TASK_END_RELEASE=0` keeps the runner until the idle window.
+Nothing brings the phone back on its own: no status read, session start or
+health check does. The next MCP tool that needs the phone (reads, taps,
+batches, flows, recording) reconnects, waits up to 150 s and then runs; when a
+person has to act it answers `phone_not_ready` (`outcome:"not_sent"`) with the
+wait and the next step — for `needs_passcode_on_phone`, ask the person to
+enter the passcode on the phone and call the tool again.
+`IPHONE_USE_MCP_RECONNECT_ON_USE=0` turns that off. HTTP clients keep the
+behaviour below.
+
 **Reconnect** only when the current task needs the phone, `recovery_owner` is
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
 it once, then poll status until `drivable:true` (MCP: `phone_reconnect` with
