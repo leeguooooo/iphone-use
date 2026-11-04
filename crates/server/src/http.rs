@@ -807,14 +807,23 @@ async fn agent_owner_inner(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         );
     }
+    // A lapsed lease still names who held it last: only that session ending
+    // its task may end it after the lapse (its own reads do not renew the
+    // lease). Another client that drove the phone since holds the lease
+    // itself, so its release is the one that counts.
+    let lapsed_own = match claim {
+        OwnerClaim::Named(name) | OwnerClaim::Takeover(name) => {
+            recover(state.owner.lock()).as_ref().is_some_and(|owner| owner.name == name)
+        }
+        OwnerClaim::Anonymous => false,
+    };
     state.release_owner_lease();
     // While a lease is live the idle watchdog leaves the phone alone; the
     // idle window starts when it is given back, not at the last action.
     state.touch_activity();
-    // The task is over: the watchdog releases the phone now. A named session
-    // ends its task even when its lease already lapsed (a long think, or a
-    // task that only read the screen: reads do not renew the lease).
-    if current.is_some() || matches!(claim, OwnerClaim::Named(_) | OwnerClaim::Takeover(_)) {
+    // The task is over: the watchdog releases the phone now. A session ends
+    // its task even when its own lease already lapsed (a long think).
+    if current.is_some() || lapsed_own {
         note_task_end();
     }
     let mut released = serde_json::json!({"ok": true, "owner": null});
@@ -22942,7 +22951,19 @@ mod tests {
         use tower::ServiceExt;
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
             let state = fixture_app_state(None);
-            assert!(state.owner.lock().unwrap().is_none(), "no live lease: it lapsed, or the task only read");
+            let lapsed = Instant::now() - std::time::Duration::from_secs(state.owner_lease_secs + 60);
+            *state.owner.lock().unwrap() = Some(PhoneOwner { name: "reader-session".into(), last_seen: lapsed });
+            assert!(owner_status(&state).0.is_none(), "no live lease: it lapsed during a long think");
+            // A different session releasing does not end this one's task.
+            *recover(TASK_ENDED_AT.lock()) = None;
+            let other = router(state.clone()).oneshot(
+                axum::http::Request::builder().method("POST").uri("/agent/owner")
+                    .header("x-phone-control", "1").header("x-phone-owner", "someone-else")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"release":true}"#)).unwrap()).await.unwrap();
+            assert_eq!(other.status(), StatusCode::OK);
+            assert!(recover(TASK_ENDED_AT.lock()).is_none(), "not that session's task");
+            *state.owner.lock().unwrap() = Some(PhoneOwner { name: "reader-session".into(), last_seen: lapsed });
             let before = Instant::now();
             let response = router(state.clone()).oneshot(
                 axum::http::Request::builder().method("POST").uri("/agent/owner")

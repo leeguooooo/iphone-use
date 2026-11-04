@@ -97,7 +97,7 @@ pub fn sweep_runner_launch_logs(derived_data: &Path, idle: std::time::Duration, 
         .filter(|dir| only_runner_launch_logs(dir))
         .filter_map(|dir| Some((newest_mtime(&dir)?, dir)))
         .collect();
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
     let mut removed = 0;
     let mut freed = 0;
     for (modified, dir) in candidates.into_iter().skip(keep) {
@@ -113,14 +113,25 @@ pub fn sweep_runner_launch_logs(derived_data: &Path, idle: std::time::Duration, 
     (removed, freed)
 }
 
-/// `dir` holds only `Logs/`, and its `Logs/Test` only the runner's result
-/// bundles (`Test-IPhoneUseRunner-*.xcresult`) and their bookkeeping.
+/// `dir` holds only `Logs/`; `Logs` holds `Test` plus the empty `Build`,
+/// `Launch`, `Package`… folders xcodebuild creates for every action; and
+/// `Logs/Test` only the runner's result bundles
+/// (`Test-IPhoneUseRunner-*.xcresult`) and their bookkeeping. A build of the
+/// project fills `Logs/Build` (`.xcactivitylog`), so such a directory stays.
 fn only_runner_launch_logs(dir: &Path) -> bool {
     let names = |path: &Path| -> Option<Vec<String>> {
         Some(std::fs::read_dir(path).ok()?.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
     };
     let Some(top) = names(dir) else { return false };
     if top.iter().any(|name| name != "Logs" && name != ".DS_Store") || !top.iter().any(|n| n == "Logs") {
+        return false;
+    }
+    let logs = dir.join("Logs");
+    let Some(kinds) = names(&logs) else { return false };
+    let empty_or_finder = |name: &String| {
+        names(&logs.join(name)).is_some_and(|inner| inner.iter().all(|n| n == ".DS_Store"))
+    };
+    if !kinds.iter().all(|name| name == "Test" || name == ".DS_Store" || empty_or_finder(name)) {
         return false;
     }
     let tests = names(&dir.join("Logs").join("Test")).unwrap_or_default();
@@ -1033,14 +1044,20 @@ mod tests {
             make(&format!("IPhoneUseRunner-launch{n}"), None);
         }
         make("IPhoneUseRunner-opened-in-xcode", Some("Build"));
+        // xcodebuild's empty per-action folders do not make a directory a build…
+        make("IPhoneUseRunner-launch-with-empty-logs", Some("Logs/Build"));
+        // …but a build log does.
+        make("IPhoneUseRunner-built", Some("Logs/Build"));
+        std::fs::write(root.path().join("IPhoneUseRunner-built/Logs/Build/x.xcactivitylog"), b"log").unwrap();
         make("SomeOtherApp-abc", None);
         // Nothing idle long enough yet: a launch in progress is never removed.
         assert_eq!(sweep_runner_launch_logs(root.path(), std::time::Duration::from_secs(600), 3), (0, 0));
         let (removed, freed) = sweep_runner_launch_logs(root.path(), std::time::Duration::ZERO, 3);
-        assert_eq!(removed, 2, "five launch dirs, three kept");
+        assert_eq!(removed, 3, "six launch dirs, three kept");
         assert!(freed >= 2000);
         let left: Vec<String> = std::fs::read_dir(root.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(left.contains(&"IPhoneUseRunner-opened-in-xcode".to_string()), "a project build is not ours to clean");
+        assert!(left.contains(&"IPhoneUseRunner-built".to_string()), "Logs/Build with a build log is not ours to clean");
         assert!(left.contains(&"SomeOtherApp-abc".to_string()));
         assert_eq!(left.iter().filter(|n| n.starts_with("IPhoneUseRunner-launch")).count(), 3);
         assert_eq!(sweep_runner_launch_logs(&root.path().join("missing"), std::time::Duration::ZERO, 0), (0, 0));

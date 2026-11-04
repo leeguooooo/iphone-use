@@ -4764,6 +4764,11 @@ impl Setup {
         };
         let path = std::fs::canonicalize(&binary).unwrap_or(binary);
         pairs.push(("IPHONE_USE_SETUP_BIN", path.to_string_lossy().into_owned()));
+        // launchd does not inherit the shell: an opt-in made at setup must
+        // reach the supervisor that launches the runner.
+        if runner::test_diagnostics_wanted() {
+            pairs.push(("IPU_RUNNER_TEST_DIAGNOSTICS", "1".into()));
+        }
         if ctx.runner_src != ctx.runner_default_src {
             pairs.push((
                 "IPU_RUNNER_SRC",
