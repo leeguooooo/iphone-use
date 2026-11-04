@@ -131,21 +131,25 @@ pub fn sweep_launch_logs_now() -> (usize, u64) {
     if !derived.is_dir() {
         return (0, 0);
     }
-    let busy_since = oldest_xcodebuild_start(&ps_elapsed_commands());
+    // Without the process list a running xcodebuild cannot be ruled out.
+    let Some(ps) = ps_elapsed_commands() else { return (0, 0) };
+    let busy_since = oldest_xcodebuild_start(&ps);
     sweep_runner_launch_logs(&derived, std::time::Duration::from_secs(600), 3, busy_since)
 }
 
-/// `ps -axo etime=,command=`: each process's elapsed time and command line.
-fn ps_elapsed_commands() -> String {
-    std::process::Command::new("ps")
+/// `ps -o etime=,command=` for this user's processes: elapsed time and
+/// command line. `None` when `ps` cannot run or fails.
+fn ps_elapsed_commands() -> Option<String> {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() }.to_string();
+    let out = std::process::Command::new("ps")
         .env("LC_ALL", "C")
-        .args(["-axww", "-o", "etime=,command="])
+        .args(["-xww", "-U", uid.as_str(), "-o", "etime=,command="])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-        .unwrap_or_default()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// When the oldest running xcodebuild started (a minute early, for clock and
@@ -155,11 +159,23 @@ fn oldest_xcodebuild_start(ps: &str) -> Option<std::time::SystemTime> {
         .lines()
         .filter_map(|line| {
             let (etime, command) = line.trim_start().split_once(char::is_whitespace)?;
-            let program = command.trim_start().split_whitespace().next()?;
-            (Path::new(program).file_name()? == "xcodebuild").then(|| parse_etime(etime))?
+            runs_xcodebuild(command.trim_start()).then(|| parse_etime(etime))?
         })
         .max()?;
     std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(oldest + 60))
+}
+
+/// The command's program is `xcodebuild`. The path may hold spaces
+/// (`/Applications/Xcode 16.app/…/xcodebuild`), so the program is everything
+/// up to the first `xcodebuild` that starts the line or follows a `/` and is
+/// followed by a space or the end.
+fn runs_xcodebuild(command: &str) -> bool {
+    command.match_indices("xcodebuild").any(|(i, word)| {
+        let before = &command[..i];
+        let after = &command[i + word.len()..];
+        (before.is_empty() || (before.ends_with('/') && !before.contains(" -")))
+            && (after.is_empty() || after.starts_with(char::is_whitespace))
+    })
 }
 
 /// `ps` etime, `[[dd-]hh:]mm:ss`, in seconds.
@@ -191,8 +207,12 @@ fn only_runner_launch_logs(dir: &Path) -> bool {
     };
     let Some(top) = names(dir) else { return false };
     let test_results_only_index = || {
-        names(&dir.join("TestResults"))
-            .is_some_and(|inner| inner.iter().all(|n| n.starts_with("metadata.db") || n == ".DS_Store"))
+        std::fs::read_dir(dir.join("TestResults")).is_ok_and(|entries| {
+            entries.flatten().all(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name == ".DS_Store" || (name.starts_with("metadata.db") && e.file_type().is_ok_and(|t| t.is_file()))
+            })
+        })
     };
     if top.iter().any(|name| match name.as_str() {
         "Logs" | ".DS_Store" => false,
@@ -1167,6 +1187,11 @@ mod tests {
         std::fs::create_dir_all(other.join("Logs/Test")).unwrap();
         std::fs::create_dir_all(other.join("TestResults/Attachments")).unwrap();
         assert!(!only_runner_launch_logs(&other));
+        // Nor is a directory that merely carries the index's name.
+        let named = root.path().join("IPhoneUseRunner-named");
+        std::fs::create_dir_all(named.join("Logs/Test")).unwrap();
+        std::fs::create_dir_all(named.join("TestResults/metadata.db-dir")).unwrap();
+        assert!(!only_runner_launch_logs(&named));
     }
 
     #[test]
@@ -1183,6 +1208,11 @@ mod tests {
         let ago = std::time::SystemTime::now().duration_since(since).unwrap().as_secs();
         assert!((659..=662).contains(&ago), "oldest is the 10-minute xcodebuild plus a minute: {ago}");
         assert_eq!(oldest_xcodebuild_start("  00:01 /bin/sleep 5\n"), None);
+        assert!(runs_xcodebuild("/Applications/Xcode 16.app/Contents/Developer/usr/bin/xcodebuild -destination x"));
+        assert!(runs_xcodebuild("xcodebuild"));
+        assert!(!runs_xcodebuild("/bin/zsh -c xcodebuild"));
+        assert!(!runs_xcodebuild("/usr/bin/grep -e /xcodebuild x"));
+        assert!(!runs_xcodebuild("/usr/bin/xcodebuild-helper"));
     }
 
     #[test]
