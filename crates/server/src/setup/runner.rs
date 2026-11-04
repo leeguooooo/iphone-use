@@ -73,6 +73,72 @@ pub fn supports_no_test_diagnostics(help: &str) -> bool {
     help.contains(NO_TEST_DIAGNOSTICS[0])
 }
 
+/// What the runner's `.xctestrun` must say so XCTest records nothing on the
+/// phone (#402). Since Xcode 15 a UI test screen-records the whole session by
+/// default (`PreferredScreenCaptureFormat = screenRecording`) and keeps the
+/// recording unless the test passes (`deleteOnSuccess`). The runner's test
+/// never passes — it serves until it is stopped — and the recording waits on
+/// the phone for a transfer that never comes: measured on an iPhone 13,
+/// about 2 MB/s of driving gone from free space and not given back when the
+/// runner stops, counted under iOS "System Data". A reporter's phone held
+/// 94 GB of it.
+pub const NO_TEST_RECORDING: [(&str, &str); 3] = [
+    ("PreferredScreenCaptureFormat", "screenshots"),
+    ("SystemAttachmentLifetime", "keepNever"),
+    ("UserAttachmentLifetime", "keepNever"),
+];
+
+/// Rewrites `xctestrun` so the runner's test records no screen and keeps no
+/// attachments ([`NO_TEST_RECORDING`]). Handles both the format-1 layout
+/// (one dict per test target at the top) and format 2
+/// (`TestConfigurations[].TestTargets[]`). Writes only when something changes,
+/// through a temporary file in the same directory. Returns whether it wrote.
+pub fn disable_test_recording(xctestrun: &Path) -> Result<bool, String> {
+    let mut value = plist::Value::from_file(xctestrun).map_err(|e| format!("could not read {}: {e}", xctestrun.display()))?;
+    let Some(root) = value.as_dictionary_mut() else {
+        return Err(format!("{} is not a dictionary", xctestrun.display()));
+    };
+    let mut changed = false;
+    let mut apply = |target: &mut plist::Dictionary| {
+        for (key, want) in NO_TEST_RECORDING {
+            if target.get(key).and_then(plist::Value::as_string) != Some(want) {
+                target.insert(key.to_string(), plist::Value::String(want.to_string()));
+                changed = true;
+            }
+        }
+    };
+    for (key, entry) in root.iter_mut() {
+        if key == "__xctestrun_metadata__" {
+            continue;
+        }
+        if key == "TestConfigurations" {
+            for config in entry.as_array_mut().into_iter().flatten() {
+                let targets = config.as_dictionary_mut().and_then(|c| c.get_mut("TestTargets")).and_then(plist::Value::as_array_mut);
+                for target in targets.into_iter().flatten() {
+                    if let Some(target) = target.as_dictionary_mut() {
+                        apply(target);
+                    }
+                }
+            }
+        } else if let Some(target) = entry.as_dictionary_mut() {
+            if target.contains_key("TestBundlePath") || target.contains_key("TestHostPath") {
+                apply(target);
+            }
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let dir = xctestrun.parent().ok_or("the .xctestrun has no directory")?;
+    let temp = dir.join(format!(".ipu-xctestrun-{}.tmp", std::process::id()));
+    let written = value.to_file_xml(&temp).map_err(|e| e.to_string()).and_then(|()| std::fs::rename(&temp, xctestrun).map_err(|e| e.to_string()));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("could not update {}: {error}", xctestrun.display()));
+    }
+    Ok(true)
+}
+
 /// `IPU_RUNNER_TEST_DIAGNOSTICS=1` keeps xcodebuild's diagnostics collection,
 /// for debugging a runner that will not start.
 pub fn test_diagnostics_wanted() -> bool {
@@ -1213,6 +1279,64 @@ mod tests {
         assert!(!runs_xcodebuild("/bin/zsh -c xcodebuild"));
         assert!(!runs_xcodebuild("/usr/bin/grep -e /xcodebuild x"));
         assert!(!runs_xcodebuild("/usr/bin/xcodebuild-helper"));
+    }
+
+    fn xctestrun_with(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("IPhoneUseRunner_iphoneos27.2-arm64.xctestrun");
+        std::fs::write(
+            &path,
+            format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>{body}
+<key>__xctestrun_metadata__</key><dict><key>FormatVersion</key><integer>1</integer></dict>
+</dict></plist>"#),
+        )
+        .unwrap();
+        (dir, path)
+    }
+
+    fn target_keys(value: &plist::Dictionary) -> Vec<(String, String)> {
+        super::NO_TEST_RECORDING
+            .iter()
+            .map(|(k, _)| (k.to_string(), value.get(k).and_then(plist::Value::as_string).unwrap_or("").to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn xctestrun_stops_screen_recording_in_both_formats() {
+        let want: Vec<(String, String)> = super::NO_TEST_RECORDING.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        // Format 1: what Xcode 26/27 builds for the runner today.
+        let (_d, path) = xctestrun_with(
+            "<key>IPhoneUseRunnerUITests</key><dict><key>TestBundlePath</key><string>x</string>\
+             <key>PreferredScreenCaptureFormat</key><string>screenRecording</string>\
+             <key>SystemAttachmentLifetime</key><string>deleteOnSuccess</string>\
+             <key>UserAttachmentLifetime</key><string>deleteOnSuccess</string></dict>",
+        );
+        assert_eq!(super::disable_test_recording(&path), Ok(true));
+        let value = plist::Value::from_file(&path).unwrap();
+        let root = value.as_dictionary().unwrap();
+        assert_eq!(target_keys(root["IPhoneUseRunnerUITests"].as_dictionary().unwrap()), want);
+        assert!(root.contains_key("__xctestrun_metadata__"), "metadata kept");
+        assert_eq!(super::disable_test_recording(&path), Ok(false), "already right: no rewrite");
+        // Format 2.
+        let (_d2, path2) = xctestrun_with(
+            "<key>TestConfigurations</key><array><dict><key>TestTargets</key><array><dict>\
+             <key>BlueprintName</key><string>IPhoneUseRunnerUITests</string>\
+             <key>PreferredScreenCaptureFormat</key><string>screenRecording</string></dict></array></dict></array>",
+        );
+        assert_eq!(super::disable_test_recording(&path2), Ok(true));
+        let value = plist::Value::from_file(&path2).unwrap();
+        let target = value.as_dictionary().unwrap()["TestConfigurations"].as_array().unwrap()[0].as_dictionary().unwrap()["TestTargets"]
+            .as_array()
+            .unwrap()[0]
+            .as_dictionary()
+            .unwrap()
+            .clone();
+        assert_eq!(target_keys(&target), want);
+        assert!(super::disable_test_recording(&path2.with_extension("missing")).is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(path2.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        assert!(leftovers.is_empty());
     }
 
     #[test]
