@@ -88,19 +88,34 @@ pub const NO_TEST_RECORDING: [(&str, &str); 3] = [
     ("UserAttachmentLifetime", "keepNever"),
 ];
 
+/// Xcode's own values for the same keys, restored for a launch with
+/// `IPU_RUNNER_TEST_DIAGNOSTICS=1` (the cached `.xctestrun` keeps whatever
+/// the last launch wrote).
+pub const XCODE_TEST_RECORDING: [(&str, &str); 3] = [
+    ("PreferredScreenCaptureFormat", "screenRecording"),
+    ("SystemAttachmentLifetime", "deleteOnSuccess"),
+    ("UserAttachmentLifetime", "deleteOnSuccess"),
+];
+
 /// Rewrites `xctestrun` so the runner's test records no screen and keeps no
 /// attachments ([`NO_TEST_RECORDING`]). Handles both the format-1 layout
 /// (one dict per test target at the top) and format 2
 /// (`TestConfigurations[].TestTargets[]`). Writes only when something changes,
 /// through a temporary file in the same directory. Returns whether it wrote.
 pub fn disable_test_recording(xctestrun: &Path) -> Result<bool, String> {
+    set_test_recording(xctestrun, &NO_TEST_RECORDING)
+}
+
+/// Writes `values` into every test target of `xctestrun`; see
+/// [`disable_test_recording`].
+pub fn set_test_recording(xctestrun: &Path, values: &[(&str, &str); 3]) -> Result<bool, String> {
     let mut value = plist::Value::from_file(xctestrun).map_err(|e| format!("could not read {}: {e}", xctestrun.display()))?;
     let Some(root) = value.as_dictionary_mut() else {
         return Err(format!("{} is not a dictionary", xctestrun.display()));
     };
     let mut changed = false;
     let mut apply = |target: &mut plist::Dictionary| {
-        for (key, want) in NO_TEST_RECORDING {
+        for &(key, want) in values {
             if target.get(key).and_then(plist::Value::as_string) != Some(want) {
                 target.insert(key.to_string(), plist::Value::String(want.to_string()));
                 changed = true;
@@ -1334,6 +1349,17 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(target_keys(&target), want);
+        // A diagnostics launch puts Xcode's values back.
+        assert_eq!(super::set_test_recording(&path2, &super::XCODE_TEST_RECORDING), Ok(true));
+        let value = plist::Value::from_file(&path2).unwrap();
+        let format = value.as_dictionary().unwrap()["TestConfigurations"].as_array().unwrap()[0].as_dictionary().unwrap()["TestTargets"]
+            .as_array()
+            .unwrap()[0]
+            .as_dictionary()
+            .unwrap()["PreferredScreenCaptureFormat"]
+            .as_string()
+            .map(str::to_string);
+        assert_eq!(format.as_deref(), Some("screenRecording"));
         assert!(super::disable_test_recording(&path2.with_extension("missing")).is_err());
         let leftovers: Vec<_> = std::fs::read_dir(path2.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
         assert!(leftovers.is_empty());

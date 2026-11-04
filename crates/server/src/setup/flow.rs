@@ -2054,8 +2054,13 @@ impl Setup {
         let previous_session = if probe { self.runner_session() } else { None };
         let no_diagnostics = !runner::test_diagnostics_wanted() && xcodebuild_has_no_diagnostics(xcodebuild);
         sweep_launch_logs();
-        // A launch that keeps diagnostics on for debugging keeps the recording too.
-        if !runner::test_diagnostics_wanted() {
+        // A launch that keeps diagnostics on for debugging gets Xcode's
+        // recording back; every other launch records nothing on the phone.
+        if runner::test_diagnostics_wanted() {
+            if let Err(error) = runner::set_test_recording(xctestrun, &runner::XCODE_TEST_RECORDING) {
+                warn(&format!("device runner test diagnostics may lack the screen recording: {error}"));
+            }
+        } else {
             match runner::disable_test_recording(xctestrun) {
                 Ok(true) => info("device runner test set to record no screen and keep no attachments on the phone"),
                 Ok(false) => {}
