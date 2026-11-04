@@ -31,6 +31,9 @@
 #   IPU_RUNNER_ASC_ISSUER_ID=... App Store Connect issuer ID
 #   IPU_RUNNER_BUNDLE_ID=...   runner bundle id (default: derived from validated Team ID)
 #   IPU_RUNNER_ICON=... the runner's Home Screen icon: auto, none, or a .png/.icns
+#   IPU_RUNNER_FILES=1  opt in to native Files access to the runner's whole Documents
+#                       directory; 0 disables it. Rebuilds/signs the outer runner;
+#                       the supervisor remembers the choice for reconnects/upgrades.
 #   IPU_RUNNER_SRC=...  device runner sources (default: ~/.iphone-use/runner; a
 #                       repo checkout uses its own runner/)
 #   IPU_EMBED=0         build the runner without the on-phone daemon

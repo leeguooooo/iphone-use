@@ -19,6 +19,7 @@ use super::pid::{self, Legacy, Role};
 use super::proc::{self, XcconfigEnv};
 use super::retry::{self, Kind};
 use super::runner;
+use super::runner_files;
 use super::status;
 use super::sys;
 use super::term::{die, info, ok, warn, Exit, Step, BOLD, RST};
@@ -78,6 +79,7 @@ pub struct Setup {
     phone_url: String,
     /// The runner's Home Screen icon source, when one is injected.
     icon_source: Option<PathBuf>,
+    runner_files: bool,
     /// Readiness came straight over USB (no LAN address known yet).
     from_probe: bool,
     /// The target is off USB and this run reaches it through CoreDevice's
@@ -169,6 +171,7 @@ impl Setup {
             self_install: SelfInstallTx::default(),
             phone_url: String::new(),
             icon_source: None,
+            runner_files: false,
             from_probe: false,
             over_tunnel: false,
             interactive_lock: None,
@@ -691,6 +694,10 @@ impl Setup {
     }
 
     fn prerequisites(&mut self) -> Step {
+        self.runner_files = match runner_files::setting(&self.ctx) {
+            Ok(enabled) => enabled,
+            Err(error) => return die(error),
+        };
         let mut previous = status::previous_blocker(&self.ctx.status_file);
         // A USB blocker from a default-mode attempt is incompatible with an
         // explicit LAN run.
@@ -1491,7 +1498,7 @@ impl Setup {
         sdk: Option<&str>,
         deployment_override: &str,
     ) -> String {
-        format!(
+        let key = format!(
             "{}|{}",
             runner::cache_key(
                 &self.ctx,
@@ -1504,8 +1511,16 @@ impl Setup {
                 deployment_override,
                 &super::embed::cache_component(self.embed.as_ref()),
             ),
-            icon::cache_component(self.icon_source.as_deref())
-        )
+            icon::cache_component(self.icon_source.as_deref()),
+        );
+        // Off is the default: its key stays what it was before Files sharing
+        // existed, so an upgrade reuses every cached runner instead of
+        // rebuilding it (and asking for the passcode) on each phone.
+        if self.runner_files {
+            format!("{key}|{}", runner_files::cache_component(true))
+        } else {
+            key
+        }
     }
 
     /// Wait for the build lock: a post-upgrade prebuild may be building this
@@ -1536,7 +1551,9 @@ impl Setup {
         let _lock = self.build_lock()?;
         let rebuild = std::env::var("IPU_RUNNER_REBUILD").is_ok_and(|v| v == "1");
         if !rebuild {
-            if let Some((products, _app, xctestrun)) = runner::cache_read(&self.ctx, key) {
+            if let Some((products, _app, xctestrun)) = runner::cache_read(&self.ctx, key)
+                .filter(|(_, app, _)| runner_files::matches(app, self.runner_files))
+            {
                 ok("Reusing the runner product from the last bring-up (no rebuild; IPU_RUNNER_REBUILD=1 forces one)");
                 self.phase(
                     "building",
@@ -1710,6 +1727,10 @@ impl Setup {
         if let Some(source) = self.icon_source.clone() {
             // Failure restores the pristine app; setup continues without it.
             icon::inject(&self.ctx, &app, &source);
+        }
+        if let Err(error) = runner_files::apply(&self.ctx, &app, self.runner_files) {
+            self.validation_error = error;
+            return Ok(None);
         }
         Ok(Some((products, xctestrun)))
     }
@@ -4437,7 +4458,9 @@ impl Setup {
             Ok(None) => return skip("another runner build is running"),
             Err(why) => return skip(&why),
         };
-        if runner::cache_read(&self.ctx, &key).is_some() {
+        if runner::cache_read(&self.ctx, &key)
+            .is_some_and(|(_, app, _)| runner_files::matches(&app, self.runner_files))
+        {
             ok("Runner product is already current; nothing to prebuild");
             return Ok(());
         }
@@ -4750,6 +4773,14 @@ impl Setup {
         pairs.push(("IPU_RUNNER_ALLOW_LAN", ctx.allow_lan.clone()));
         pairs.push(("IPU_RUNNER_TRANSPORT", ctx.transport.clone()));
         pairs.push(("IPU_RUNNER_EXIT_NOTICE", ctx.exit_notice_value().into()));
+        let files = match runner_files::setting(&ctx) {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                warn(&error);
+                return false;
+            }
+        };
+        pairs.push((runner_files::ENV, if files { "1" } else { "0" }.into()));
         // The on-phone daemon: the supervisor's relaunches must build and
         // start the same runner as this run.
         pairs.push(("IPU_EMBED", ctx.embed.clone()));

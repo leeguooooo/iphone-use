@@ -324,6 +324,27 @@ completeness and UTF-16 limit. A truncated preview is not a full value; secure o
 unsupported fields require a permitted alternative. Ownership/privacy changes
 withhold results. This read does not focus, unlock, or claim control.
 
+### Native Files handoff (opt-in candidate)
+
+When an export needs an explicit file, check `iphone-use files --help`. With
+Runner Files enabled, use the source app's native Save to Files UI, finish the
+save into the Runner inbox, then receive that exact filename:
+
+```sh
+iphone-use files receive --device '<selected-udid>' --bundle '<installed-runner>.xctrunner' \
+  --instance '<selected-instance>' --owner '<your-existing-lease-owner>' \
+  --filename '<exact-saved-name>' --destination '<absolute-mac-folder>'
+```
+
+Use your own lease, the selected instance and verified bundle ID. This command
+does not acquire someone else's control or establish that a source writer has
+finished. Its current checks require a wired connection but do not lock the
+transport. Confirm `committed:true`; retain the transfer ID and digest. After
+interruption, use `iphone-use files result` with the same device, bundle,
+instance, state directory and transfer ID. An unknown outcome requires
+inspection before another receive. `files stop` requests receiver cancellation.
+The receiver remains a candidate with documented checkpoint and upgrade gaps.
+
 ## Focused observation and action receipts
 
 `phone_subtree(element, snapshot)` reads a unique native element's descendants.

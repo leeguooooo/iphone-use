@@ -28,6 +28,9 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: USB file handoff offline regressions
+        if: ${{ hashFiles('experiments/usb-file-bridge/tests/test_*.py') != '' }}
+        run: python3 -m unittest discover -s experiments/usb-file-bridge/tests -v
       - run: python3 -I scripts/test-bench-census.py
       - run: python3 -I scripts/test-agent-bench-runtime.py
       - run: python3 -I scripts/test-agent-bench-policy.py
@@ -122,6 +125,9 @@ jobs:
       - name: Native click delivery certainty (synthetic callbacks, no UI)
         run: python3 -I scripts/test-native-click-delivery.py
 
+      - name: Runner private daemon control storage (synthetic symbols, no UI)
+        run: python3 -I scripts/test-runner-daemon-control.py
+
       - name: Native text delivery certainty (synthetic callbacks, no UI)
         run: python3 -I scripts/test-native-text-delivery.py
 
@@ -149,6 +155,20 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p server --locked --no-fail-fast
+
+      - name: Owned signed Runner product transaction (no device)
+        timeout-minutes: 8
+        run: python3 -I scripts/test-runner-files-signing.py
+
+      - name: Preserve owned signing transaction receipt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: runner-files-signing
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/runner-files-signing.json
+            ${{ runner.temp }}/runner-files-signing-test.log
 
       - name: Real daemon target-scope protocol (synthetic provider, no UI)
         timeout-minutes: 8

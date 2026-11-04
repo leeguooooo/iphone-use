@@ -1,0 +1,219 @@
+# Runner-native validation — 2026-10-29
+
+macOS 27.0.1, Xcode 27.1, iPhone 17 Pro / iOS 27.0.1, iPhone Use 0.27.6.
+Based on upstream `a1355ab`. Private identifiers and source documents are omitted.
+
+## Current implementation
+
+- The existing signed `.xctrunner` was backed up, staged with the two public
+  file-sharing plist keys, and re-signed with the same identity/entitlements.
+  `codesign --verify --deep --strict` passed; icon and nested executable preserved.
+- Installed into the same runner identity and resumed through the official
+  supervisor. `drivable=true`, `runner_actionable=true`, `transport=usb`.
+- iOS Files displayed **iPhoneUse-Runner** with its existing icon and the inbox
+  folder. The folder was added to Favorites using native UI.
+- QQ Mail real PDF → Save to Files → runner inbox → Mac: 109,440 bytes, expected
+  SHA-256 matched. Repeating the receive returned `already_identical`.
+- Synthetic 16 MiB file seeded into the same runner container → Mac: 16,777,216
+  bytes, expected SHA-256 matched. This checks the payload path; the real PDF
+  separately covers native Save UI. Two copies were read for stability.
+- No Copy action, pasteboard API, shared-pasteboard cache or Handoff-setting
+  change was used. Hashes are computed on the Mac, not inside the runner.
+
+`python3 -m unittest discover -s tests -v`: **38 tests passed**. Coverage includes
+actual CLI errors/status, cancellation/locks/stale state, lease/UDID/wireless
+checks, deadlines, path/metadata/size validation, two-read disagreement, source
+changes, expected digest, idempotency, symlinks, non-overwriting publication
+races, post-commit receipt errors and preservation of plist identity/icon.
+Device errors are mocked for the failure-path tests.
+
+Synthetic bytes: `0..255` repeated 65,536 times (16 MiB).
+SHA-256: `341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1`.
+
+## Scope changes and remaining checks
+
+The standalone Swift app and its UI have been removed from the proposal.
+Its earlier 23 tests and Debug/Release builds are historical evidence for that
+previous prototype, not claimed as Runner-native coverage. This version does
+not change Runner source or require a new Swift binary build.
+
+Physical cable removal during a copy, transient route changes between guard
+checkpoints, the 64 MiB hardware boundary, multiple devices, older iOS versions,
+and persistence through an official rebuild/upgrade remain untested. Native
+Save must finish before reception; two stable snapshots alone cannot establish
+completion of an unrelated asynchronous writer. This remains a draft experiment
+pending setup/signing/cache integration review.
+
+## Owner-loss regression (review follow-up)
+
+The reviewer reproduced an owner change during the blocking CoreDevice
+transport probe. The new tests failed against the prior code (including actual
+`commit_file` calls with the real guard), then passed with the fix. Lease checks
+now run after transport discovery and immediately before each device copy.
+Cases include owner replacement/release, target UDID change, loss of drivable
+state, fresh destination publication, and an existing identical destination.
+Aborted publication leaves no new target or staging file and releases its lock.
+These are offline regressions; no additional phone access was needed.
+
+This closes the reproduced blocking-probe window, not every possible race:
+a status observation is not an atomic lease held across a device subprocess or
+filesystem publication. A daemon-native transaction is still required for that
+stronger guarantee.
+
+## Recoverable publication follow-up
+
+Ten additional offline tests cover cancellation immediately after a successful
+link, interrupted success-receipt delivery through the CLI, journal-completion
+failure, pre-publication abort, uncertain commit attempts, replacement/in-place
+modification of the target, ID reuse/traversal, and recovery from a separate
+process that exits immediately after linking (no Python cleanup). The new process
+can query the persisted intent and verify the destination identity and hash.
+
+These tests do not strengthen the documented owner/transport checkpoints into
+an atomic lease. Same-name lease reincarnation, source freshness and hard live
+I/O quotas still require integration with the daemon/transfer protocol.
+
+
+## Descriptor-bound reconciliation follow-up
+
+Recovery now hashes the same opened regular-file descriptor whose device/inode
+matches the publication intent. It checks file metadata and the destination path
+binding before and after the read. Replacement or in-place changes during the
+inspection remain `unknown`.
+
+Three offline regressions cover replacement between identity inspection and
+hashing, replacement during hashing, and in-place modification during hashing.
+All three fail against the prior recovery code; the full 38-test suite passes
+with the descriptor-bound check. No additional phone access was used. The result
+is a read-time observation, not a promise that another process cannot change the
+file after the check completes.
+
+## Normal setup integration candidate
+
+The PR now adds opt-in `IPU_RUNNER_FILES=1` to normal setup, supervisor
+persistence and upgrade prebuilds, including a setting-specific cache key and
+outer-plist validation. It stages and signs the outer runner using its original
+certificate and entitlements. This replaces the need to manually swap a patched
+cached product on binaries built from this PR.
+
+The 38 receiver tests were rerun successfully in an isolated source directory.
+Focused source-module checks cover opt-in parsing, different cache keys, plist
+identity/icon preservation and rejection of incomplete or non-boolean sharing
+metadata. These lightweight checks use adapters for unrelated setup services;
+they do not exercise a real signing identity, the complete setup engine or
+device installation. Full PR CI and signed-product/hardware upgrade acceptance
+remain required for this integration candidate. No phone was operated for it.
+
+## Runner private control storage candidate
+
+Source inspection found that the embedded daemon's pairing/relay handoff used
+Documents. The Runner host now chooses a private Library directory through a
+new C entry point; the separate app's original entry point and seven arguments
+remain unchanged. A Files-enabled Runner refuses the legacy-only embedded
+library rather than trusting public Documents as daemon control input.
+Old public files are not migrated or deleted.
+
+The source-level check executes the actual path helper and C export wrappers
+with a synthetic start callback, and the complete production Swift daemon
+loader with controlled symbol lookup. Nine library/Files/off scenarios and four actual Foundation bundle-metadata
+cases pass. Real temporary directories verify 0700 control permissions and
+reject public state or symlinked control. No actual daemon, Simulator or phone
+was started. An added CI lane builds the actual iOS static library, links it
+into an unsigned Runner and checks both C entry symbols; its result is pending. Server unit coverage checks
+the path boundary and legacy app behavior. Full integration CI, signed-library
+symbol retention and actual signed-device upgrade acceptance remain required.
+
+## Packaged command candidate
+
+`iphone-use files` embeds the shared three-module receiver engine into the
+CLI binaries built from this PR. It uses isolated Python standard-library execution
+and replaces its process, preserving receiver cancellation and exit status.
+The engine's lease query is bound to that same CLI executable rather than an
+older binary found on PATH. Explicit instance flags override the environment.
+
+The shared suite now has 40 passing checks, including executable binding and
+instance selection. The actual Rust entry module, compiled in a small standalone
+harness, passed help/idle-status/missing-owner checks from a copied binary in an
+isolated directory with poisoned PYTHONPATH/current-directory modules. No phone
+or daemon was contacted. A full CLI integration test checks the real clap entry
+and no-checkout behavior in PR CI; its result is pending.
+
+This packaging does not strengthen the previously documented owner/transport
+checkpoints into atomic lease fencing, prove source freshness, or establish a
+hard live I/O quota. Same-owner reincarnation and signed-device acceptance
+remain open work; neither command availability nor a green build closes them.
+
+## Lease generation checkpoint follow-up
+
+The status response now carries a public daemon-instance correlation nonce,
+owner, privacy and Runner lifecycle generations. Epochs use
+decimal strings to avoid JSON numeric precision loss. A fresh daemon process
+gets a new correlation nonce; it is not an authentication credential.
+
+The receiver binds its first validated checkpoint and refuses changed or
+missing identities, private scope and non-boolean drivable state. Same-name
+reacquisition, daemon replacement and a private-then-public transition no longer
+pass merely because the owner text matches. A generation change during blocking
+transport discovery is also refused. The new checks fail against the previous
+receiver; 43 offline engine tests now pass.
+
+These are still status checkpoints, not an atomic lease fence around the final
+hard link. Full HTTP/CLI CI and real device verification are pending.
+
+## Per-instance toolchain candidate
+
+The read-only instance-context response now includes the setup engine's chosen
+developer directory or a diagnostic error. The receiver resolves it lazily
+before its first CoreDevice command, binds the selected instance in the child
+environment, and pins the directory for the invocation. A system choice is
+resolved once with xcode-select; the global preference is not written. Invalid
+or missing context is refused before device tools run. Offline result/status/stop
+remain independent of Xcode.
+
+45 shared engine tests pass, including remembered/system directory selection,
+SDKROOT isolation, pinning across later context changes and pre-device refusal.
+A real CLI test checks remembered Xcode and invalid-choice diagnostics using an
+owned non-executed tool fixture; full CI for this candidate is pending. These
+checks are not physical CoreDevice handoff or signed upgrade acceptance.
+
+## Atomic setup product replacement
+
+The verified staged Runner and installed product now exchange paths through one
+macOS RENAME_SWAP operation. There is no intermediate rename that removes the
+installed path. Unsupported filesystems fail without a two-rename fallback;
+temporary-directory cleanup removes the old product after a successful exchange.
+A process kill may leave that temporary directory, while the installed path
+continues to name the old or new bundle. This does not claim power-loss durability
+or signed-device setup acceptance.
+
+Five production-source module checks pass on a real local filesystem, including
+exchange of two nonempty bundles, cleanup preserving the new installed bundle,
+and a missing-stage error preserving the original bundle. The isolated harness
+adapts unrelated setup/signing services; the exchange itself calls the real
+macOS syscall. Full integrated PR CI for this new head remains pending.
+
+At preceding head 3cc0c18f, full PR CI 41313251749, actual iOS ABI/link CI
+41313251778, Simulator 41313251774 and security scan 41313251852 passed.
+These supersede the pending CI notes for earlier candidates above, without
+extending their physical-device or signing acceptance scope.
+
+## Owned signed-product transaction lane
+
+An ignored production-module test is enabled only by an owned GitHub-hosted
+macOS fixture. The driver creates a temporary self-signed code-signing identity
+and keychain, leaves trust policy unchanged, restores keychain preferences,
+and removes its keychain in cleanup. It refuses personal and self-hosted
+environments before running commands. It never uses an Apple account or phone.
+
+The test calls the actual customization/ownership/signature-validation functions
+on a signed macOS bundle with a nested signed xctest-shaped bundle. It checks
+two successive customizations, certificate/parsed entitlement/identity/icon
+preservation, unchanged nested bytes, opt-out refusal on an enabled product, and
+unchanged valid original bytes when its owned private identity is removed.
+This is not an iOS provisioning, full setup/cache/reconnect/upgrade or physical
+acceptance claim. The new lane is pending CI; local module tests leave it ignored.
+
+The first owned signing transaction passed its production test, but its separate
+admin-trust cleanup timed out and the full CI failed. That failed run is retained.
+The fixture now changes no trust settings and uses no privileged commands;
+cleanup timeout reporting is bounded. This correction awaits a fresh CI run.

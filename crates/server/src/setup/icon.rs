@@ -112,7 +112,7 @@ pub fn cache_component(source: Option<&Path>) -> String {
 /// without re-signing and fails validation (#75). Only this instance's own
 /// app at its fixed products path is ever removed.
 pub fn discard_previous_injection(ctx: &Ctx, app: &Path) -> Result<(), String> {
-    if !app.join(INJECTED_MARKER).exists() {
+    if !app.join(INJECTED_MARKER).exists() && !super::runner_files::customized(app) {
         return Ok(());
     }
     owned_app(ctx, app)?;
@@ -120,7 +120,7 @@ pub fn discard_previous_injection(ctx: &Ctx, app: &Path) -> Result<(), String> {
         .map_err(|e| format!("could not remove the previously injected runner: {e}"))
 }
 
-fn owned_app(ctx: &Ctx, app: &Path) -> Result<(), String> {
+pub(super) fn owned_app(ctx: &Ctx, app: &Path) -> Result<(), String> {
     let products = &ctx.runner_products_dir;
     let owned = products.to_string_lossy().contains("/Build/Products/")
         && app.parent() == Some(products.as_path())
