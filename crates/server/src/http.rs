@@ -4771,7 +4771,9 @@ fn task_ended(
 
 impl AppState {
     fn task_ended(&self) -> bool {
-        if !task_end_release_enabled() {
+        // A recording outlives the requests that started it: releasing the
+        // runner under it would cut the video short without saying so.
+        if !task_end_release_enabled() || crate::recording::Recorder::global().is_recording() {
             return false;
         }
         let ended_at = *recover(TASK_ENDED_AT.lock());

@@ -124,17 +124,21 @@ recordVideo`: its status and summary carry `"via":"simctl"` and no `frames`, `wi
 simulator is still booting and `shutdown` when it is off; wait, or run `iphone-use
 simulator start` again.
 
-**Task end and reconnect on use.** `POST /agent/owner {"release":true}`
+**Task end and reconnect on use.** On a daemon-managed runner
+(`recovery_owner:"daemon"`), `POST /agent/owner {"release":true}`
 (`phone_release_owner`) ends the task and the daemon stops the device runner
 right away — on a passcode phone too — so the phone leaves automation mode
 between tasks; a lease that lapses without a release counts as a task end as
-well. `IPHONE_USE_TASK_END_RELEASE=0` keeps the runner until the idle window.
-Nothing brings the phone back on its own: no status read, session start or
-health check does. The next MCP tool that needs the phone (reads, taps,
-batches, flows, recording) reconnects, waits up to 150 s and then runs; when a
+well. A live viewer, an active `phone_hold` or a running recording keeps the
+runner until they end. `IPHONE_USE_TASK_END_RELEASE=0` keeps the runner until
+the idle window. An external runner is never stopped by this daemon. Nothing
+brings the phone back on its own: no status read, session start or health
+check does (unless `IPHONE_USE_MCP_PREWARM=1` opts into pre-warming on those). The next MCP tool that needs the phone (reads, taps,
+batches, flows, a recording start) reconnects, waits up to 150 s and then
+runs (not during a private hold); when a
 person has to act it answers `phone_not_ready` (`outcome:"not_sent"`) with the
-wait and the next step — for `needs_passcode_on_phone`, ask the person to
-enter the passcode on the phone and call the tool again.
+wait and the next step — for `needs_passcode_on_phone`, if the phone shows
+the passcode prompt, ask the person to enter it there and call the tool again.
 `IPHONE_USE_MCP_RECONNECT_ON_USE=0` turns that off. HTTP clients keep the
 behaviour below.
 

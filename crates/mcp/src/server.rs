@@ -872,9 +872,29 @@ const RECONNECT_ON_USE_BUDGET: std::time::Duration = std::time::Duration::from_s
 /// See [`PhoneHandler::usable_seen`]. Well under the idle window (300 s).
 const RECONNECT_CHECK_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
-fn reconnect_on_use(tool: &str) -> bool {
-    RECONNECT_ON_USE_TOOLS.contains(&tool)
-        && std::env::var("IPHONE_USE_MCP_RECONNECT_ON_USE").map_or(true, |v| v.trim() != "0")
+fn reconnect_on_use(tool: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    let arg = |key: &str| args.and_then(|args| args.get(key)).and_then(serde_json::Value::as_str);
+    let needs_phone = match tool {
+        // Only a start needs the runner; status and stop read the recorder.
+        "phone_record" => arg("action") == Some("start"),
+        // A bad id is refused before anything reaches the phone; do not
+        // make the caller wait for (or type a passcode for) a reconnect first.
+        "phone_flow_run" => arg("id").is_some_and(|id| {
+            id.ends_with(".json") || crate::registry::valid_flow_id(id)
+        }),
+        _ => RECONNECT_ON_USE_TOOLS.contains(&tool),
+    };
+    needs_phone && std::env::var("IPHONE_USE_MCP_RECONNECT_ON_USE").map_or(true, |v| v.trim() != "0")
+}
+
+/// Whether a tool result is the daemon refusing because the phone is
+/// released or coming back: the next call must check status again.
+fn refused_as_released(result: &CallToolResult) -> bool {
+    result.content.iter().filter_map(|c| c.as_text()).any(|t| {
+        ["\"released\"", "\"reconnect_in_progress\"", "\"reconnecting\"", "\"releasing\""]
+            .iter()
+            .any(|needle| t.text.contains(&format!("\"error\":{needle}")))
+    })
 }
 
 /// Whether this status is a phone the MCP server may bring back for a tool
@@ -890,6 +910,8 @@ fn may_reconnect_for_use(status: &crate::types::StatusResponse, me: &str) -> boo
         && !flag("ended_on_phone")
         && !flag("runner_parked")
         && status.releasing != Some(true)
+        // A private hold refuses screen reads anyway; do not start the runner for one.
+        && status.extra.get("screen_private_secs").and_then(serde_json::Value::as_u64).unwrap_or(0) == 0
         && status.setup_blocked_on.as_deref().is_none_or(|b| b.trim().is_empty())
         && status.owner.as_deref().is_none_or(|owner| owner == me)
 }
@@ -903,7 +925,7 @@ fn reconnect_on_use_stopped(tool: &str, wait: &ReconnectWait) -> CallToolResult 
         .and_then(|s| s.setup_blocked_on.clone())
         .unwrap_or_default();
     let advice = if blocker.starts_with("needs_passcode") {
-        "iOS is asking for the passcode on the iPhone to allow automation. Ask the person to enter it on the phone (never ask for the passcode itself), then call this tool again; the reconnect keeps going meanwhile."
+        "starting the device runner may need the passcode on the iPhone to allow automation. If the phone shows that prompt, ask the person to enter it there (never ask for the passcode itself), then call this tool again; if no prompt is showing, check phone_status (hint, setup_message) and the phone's connection instead."
     } else {
         match wait.outcome {
             "retrying" => "the daemon is retrying on its own; call this tool again after wait.status.setup_retry.next_in_secs before asking a person to act.",
@@ -2538,8 +2560,9 @@ impl PhoneHandler {
             open_world_hint = false,
         ),
         description = "Release this session's phone lease when its task ends, so another session can drive immediately. \
-        It also frees the phone: the daemon stops the device runner right away, so the phone leaves automation \
-        mode (IPHONE_USE_TASK_END_RELEASE=0 keeps the runner until the idle window); the next phone tool brings it back. \
+        It also frees the phone: a daemon-managed runner is stopped right away, so the phone leaves automation \
+        mode, unless a live viewer, an active phone_hold or a recording keeps it (IPHONE_USE_TASK_END_RELEASE=0 \
+        keeps the runner until the idle window); the next phone tool brings it back. \
         Unlike phone_hold(secs=0), this gives up ownership rather than merely clearing a pause. It sends no \
         phone input and returns ok with owner=null; releasing an already-unowned phone succeeds. A different \
         session's active lease returns phone_owned and is never taken over. Authentication/transport \
@@ -3692,7 +3715,7 @@ impl ServerHandler for PhoneHandler {
         };
         let handler = selected.as_ref().unwrap_or(self);
         let mut reconnected = None;
-        if reconnect_on_use(&name) {
+        if reconnect_on_use(&name, request.arguments.as_ref()) {
             match handler.reconnect_for_use(&name).await {
                 Ok(note) => reconnected = note,
                 Err(stopped) => {
@@ -3710,9 +3733,14 @@ impl ServerHandler for PhoneHandler {
         if let Some(note) = reconnected {
             result.content.push(Content::text(note));
         }
-        if name == "phone_release_owner" {
-            handler.note_usable(false); // the task ended: the phone is released
-        } else if RECONNECT_ON_USE_TOOLS.contains(&name.as_ref()) && result.is_error != Some(true) {
+        if name == "phone_release_owner" || refused_as_released(&result) {
+            // The task ended, or the phone was released under this session
+            // (another session's task end, an idle release): check again.
+            handler.note_usable(false);
+        } else if RECONNECT_ON_USE_TOOLS.contains(&name.as_ref())
+            && name != "phone_record"
+            && result.is_error != Some(true)
+        {
             handler.note_usable(true);
         }
         result.meta.get_or_insert_with(rmcp::model::Meta::new).0
@@ -6325,6 +6353,17 @@ mod tests {
         };
         let text = reconnect_on_use_stopped("phone_tap", &passcode).content[0].as_text().unwrap().text.clone();
         assert!(text.contains("phone_not_ready") && text.contains("never ask for the passcode"), "{text}");
+        let args = |v: serde_json::Value| v.as_object().cloned();
+        assert!(reconnect_on_use("phone_record", args(serde_json::json!({"action": "start"})).as_ref()));
+        assert!(!reconnect_on_use("phone_record", args(serde_json::json!({"action": "status"})).as_ref()));
+        assert!(!reconnect_on_use("phone_record", args(serde_json::json!({"action": "stop"})).as_ref()));
+        assert!(reconnect_on_use("phone_flow_run", args(serde_json::json!({"id": "health/export"})).as_ref()));
+        assert!(!reconnect_on_use("phone_flow_run", args(serde_json::json!({"id": "Not A Flow"})).as_ref()));
+        assert!(reconnect_on_use("phone_elements", None));
+        assert!(!may_reconnect_for_use(&status(serde_json::json!({"screen_private_secs": 30})), "me"));
+        let refused = CallToolResult::error(vec![Content::text(r#"{"ok":false,"error":"released","reconnecting":false}"#)]);
+        assert!(refused_as_released(&refused));
+        assert!(!refused_as_released(&CallToolResult::success(vec![Content::text(r#"{"released":true}"#)])));
     }
 
     #[test]

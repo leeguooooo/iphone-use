@@ -376,6 +376,13 @@ impl Recorder {
         }
     }
 
+    /// Whether a recording runs, for synchronous callers (the idle
+    /// watchdog). A start or stop holding the lock counts as recording, so
+    /// the answer errs on keeping the runner up.
+    pub fn is_recording(&self) -> bool {
+        self.current.try_lock().map_or(true, |current| current.is_some())
+    }
+
     /// The current recording's progress, if any.
     pub async fn status(&self) -> Option<RecordingStatus> {
         self.current.lock().await.as_ref().map(Recording::status)
