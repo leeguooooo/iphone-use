@@ -128,7 +128,16 @@ simulator start` again.
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
 it once, then poll status until `drivable:true` (MCP: `phone_reconnect` with
 `wait_secs`, e.g. 180, does the polling and returns `wait.outcome`
-`drivable` / `blocked` / `timeout` with the compact final status):
+`drivable` / `blocked` / `retrying` / `stopped` / `timeout` with the compact
+final status). After a failed setup round, status carries `setup_retry`
+(`{kind, attempt, next_in_secs}`) while the supervisor has its own retry
+scheduled; a blocker it is about to retry (a Wi-Fi tunnel that was briefly
+not found) often clears with no one touching the phone. The wait keeps going
+across such a retry, and returns `retrying` when the retry is due within a
+minute but after the wait would end: check status after `next_in_secs` before
+asking a person to plug in or unlock the phone. A retry further out than a
+minute (a slow backoff), or a blocker that held for 20 s across one retry,
+returns `blocked`:
 
 ```bash
 curl -s -H "$AUTH" -H "$MUTATION" -H 'Content-Type: application/json' \
@@ -1418,7 +1427,11 @@ Two helpers for Mode A:
   centre of its `rect` by coordinates (divide by `screen` for the 0–1
   fractions), never by `element`. It runs Apple's Vision on a fresh
   screenshot (macOS; the first use compiles a small helper and can take
-  longer). A failure is `ocr_error` beside a normal answer, never a failed read.
+  longer). A failure is `ocr_error` beside a normal answer, never a failed read,
+  with `ocr_status`: `warming` (Vision was cold after idle; the read stopped
+  waiting after 10 s but the recognition keeps going, so retry after
+  `ocr_retry_after_ms`), `busy` (an earlier run is still going; retry soon) or
+  `failed`. `ocr_ms` is the time OCR added to the read.
 - **Numbered screenshot.** `GET /agent/screenshot?overlay=elements` outlines
   each interactive element and draws its index in a magenta badge, so you can
   say "tap 12" from the picture: `{"type":"tap","element":12,"snapshot":…}`
