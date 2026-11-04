@@ -2131,8 +2131,10 @@ impl PhoneHandler {
         then wait for the outcome: pass wait_secs (e.g. 180) to block until drivable=true, \
         a blocker (setup_blocked_on), or the timeout, instead of polling phone_status; \
         `wait.outcome` is drivable, blocked, retrying, stopped or timeout; retrying means the \
-        supervisor will retry the blocker on its own (wait.status.setup_retry.next_in_secs) — check \
-        phone_status after that before asking a person to act. While it is reconnecting, report \
+        supervisor will retry the blocker on its own within a minute, after the wait \
+        (wait.status.setup_retry.next_in_secs) — check phone_status after that before asking a \
+        person to act. A retry further out than a minute, or a blocker that held across one \
+        retry, is blocked. While it is reconnecting, report \
         setup_phase/setup_message and obey setup_blocked_on. This tool \
         never accepts a UDID and cannot switch devices. \
         An externally managed runner returns an operator-owned recovery error."
@@ -2208,7 +2210,10 @@ impl PhoneHandler {
         };
         // Out of time with the supervisor still retrying a blocker: say so,
         // rather than a bare timeout or a settled blocker.
-        let outcome = match (outcome, &blocked, last_status.as_ref().and_then(reconnect_setup_retry)) {
+        // Only from a status read that succeeded last; a failed or hung read
+        // stays a timeout with its status_error.
+        let retry = last_status.as_ref().filter(|_| last_error.is_none()).and_then(reconnect_setup_retry);
+        let outcome = match (outcome, &blocked, retry) {
             ("timeout", Some(_), Some(_)) => "retrying",
             (outcome, ..) => outcome,
         };

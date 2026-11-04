@@ -76,15 +76,21 @@ pub struct RecognitionReservation {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-/// When the running background recognition started (ms since the epoch), or 0.
-static BACKGROUND_STARTED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When the running background recognition started, if one is running.
+static BACKGROUND_STARTED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn set_background_started(at: Option<std::time::Instant>) {
+    *BACKGROUND_STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = at;
+}
 
 /// How long the background recognition in flight has been running, if one is.
 /// A run that outlived its caller is usually Vision loading its models after
 /// idle; it ends on its own and the next read is fast.
 pub fn busy_for() -> Option<Duration> {
-    let started = BACKGROUND_STARTED_MS.load(std::sync::atomic::Ordering::Acquire);
-    (started > 0).then(|| Duration::from_millis(crate::metrics::now_ms().saturating_sub(started)))
+    BACKGROUND_STARTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .map(|started| started.elapsed())
 }
 
 fn reserve_on(lane: &std::sync::Arc<tokio::sync::Semaphore>) -> Result<RecognitionReservation> {
@@ -115,12 +121,12 @@ where
         struct Running;
         impl Drop for Running {
             fn drop(&mut self) {
-                BACKGROUND_STARTED_MS.store(0, std::sync::atomic::Ordering::Release);
+                set_background_started(None);
             }
         }
         let _reservation = reservation;
         let _running = Running;
-        BACKGROUND_STARTED_MS.store(crate::metrics::now_ms().max(1), std::sync::atomic::Ordering::Release);
+        set_background_started(Some(std::time::Instant::now()));
         work.await
     })
     .await

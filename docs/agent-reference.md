@@ -133,9 +133,11 @@ final status). After a failed setup round, status carries `setup_retry`
 (`{kind, attempt, next_in_secs}`) while the supervisor has its own retry
 scheduled; a blocker it is about to retry (a Wi-Fi tunnel that was briefly
 not found) often clears with no one touching the phone. The wait keeps going
-across such a retry, and returns `retrying` when the retry comes after the
-wait would end: check status after `next_in_secs` before asking a person to
-plug in or unlock the phone:
+across such a retry, and returns `retrying` when the retry is due within a
+minute but after the wait would end: check status after `next_in_secs` before
+asking a person to plug in or unlock the phone. A retry further out than a
+minute (a slow backoff), or a blocker that held for 20 s across one retry,
+returns `blocked`:
 
 ```bash
 curl -s -H "$AUTH" -H "$MUTATION" -H 'Content-Type: application/json' \
