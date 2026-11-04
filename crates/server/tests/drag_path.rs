@@ -18,7 +18,12 @@ async fn post_to(
     uri: &str,
     body: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
-    let app = server::http::router(build_state_with_runner(base));
+    post_on_state(build_state_with_runner(base), uri, body).await
+}
+async fn post_on_state(
+    state: Arc<server::http::AppState>, uri: &str, body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let app = server::http::router(state);
     let response = app
         .oneshot(
             Request::builder()
@@ -199,6 +204,9 @@ fn a_system_alert_blocks_the_whole_path_before_motion() {
             if request.starts_with("POST /session ") {
                 return Some((Duration::ZERO, r#"{"value":{"sessionId":"S"}}"#.into()));
             }
+            if request.contains("/window/size") {
+                return Some((Duration::ZERO,r#"{"value":{"width":390,"height":844}}"#.into()));
+            }
             if request.contains("/alert/text") {
                 return Some((Duration::ZERO, r#"{"value":"Permission?"}"#.into()));
             }
@@ -210,7 +218,11 @@ fn a_system_alert_blocks_the_whole_path_before_motion() {
             }
             Some((Duration::ZERO, r#"{"value":null}"#.into()))
         });
-        let (status, body) = post(runner.url(), batch(path())).await;
+        // A live agent first probes status, which establishes the session.
+        // Keep cold-session setup out of the short alert-only probe budget.
+        let state=build_state_with_runner(runner.url());
+        state.runner.as_ref().unwrap().lock().await.window_size().await.unwrap();
+        let (status, body) = post_on_state(state,"/agent/actions",batch(path())).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body["error"], "alert_present");
         assert_eq!(body["retry_safe"], true);

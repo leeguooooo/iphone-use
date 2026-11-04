@@ -76,9 +76,31 @@ pub struct RecognitionReservation {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
+/// When the running background recognition started, if one is running.
+static BACKGROUND_STARTED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+fn set_background_started(at: Option<std::time::Instant>) {
+    *BACKGROUND_STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = at;
+}
+
+/// How long the background recognition in flight has been running, if one is.
+/// A run that outlived its caller is usually Vision loading its models after
+/// idle; it ends on its own and the next read is fast.
+pub fn busy_for() -> Option<Duration> {
+    BACKGROUND_STARTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .map(|started| started.elapsed())
+}
+
 fn reserve_on(lane: &std::sync::Arc<tokio::sync::Semaphore>) -> Result<RecognitionReservation> {
-    let permit = lane.clone().try_acquire_owned()
-        .map_err(|_| anyhow::anyhow!("OCR is already recognizing a screen; retry a fresh read after the current run finishes"))?;
+    let permit = lane.clone().try_acquire_owned().map_err(|_| match busy_for() {
+        Some(running) => anyhow::anyhow!(
+            "OCR is already recognizing a screen ({} s so far: after sitting idle Vision loads its models first); retry a fresh read in a few seconds",
+            running.as_secs()
+        ),
+        None => anyhow::anyhow!("OCR is already recognizing a screen; retry a fresh read after the current run finishes"),
+    })?;
     Ok(RecognitionReservation { _permit: permit })
 }
 
@@ -94,7 +116,17 @@ where
     T: Send + 'static,
 {
     tokio::spawn(async move {
+        // Declared after the reservation, so it drops first: the start time
+        // is cleared before the lane opens, even when the work panics.
+        struct Running;
+        impl Drop for Running {
+            fn drop(&mut self) {
+                set_background_started(None);
+            }
+        }
         let _reservation = reservation;
+        let _running = Running;
+        set_background_started(Some(std::time::Instant::now()));
         work.await
     })
     .await

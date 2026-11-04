@@ -345,6 +345,15 @@
       box-shadow: 0 0 0 1px rgba(0,0,0,.2);
       animation: ripple .55s var(--ease) forwards;
     }
+    .ripple.agent { border-color: #5ce0b3; background: rgba(92,224,179,.28); }
+    .agent-target-rect {
+      position: absolute; border: 2px solid #5ce0b3; border-radius: 5px;
+      box-sizing: border-box; animation: agent-target-fade .8s ease-out forwards;
+    }
+    @keyframes agent-target-fade { from { opacity: .9; } to { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      .ripple.agent { animation: agent-target-fade .8s linear forwards; }
+    }
     .ripple.pending { animation: ripple-pending .9s ease-in-out infinite; }
     .ripple.fail { border-color: var(--danger); background: rgba(255,93,104,.30); animation: ripple .7s var(--ease) forwards; }
     @keyframes ripple { from { transform: scale(.5); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
@@ -3283,7 +3292,7 @@ function drawGrid() {
 window.addEventListener('resize', () => { if (gridOn) drawGrid(); });
 
 /* ── Content-rect coord mapping [iOS §Touch] ──────────────────── */
-function pointerToNormalized(clientX, clientY) {
+function visibleFrameContentRect() {
   // The visible source owns the coordinate system. This includes the periodic
   // PNG fallback after MJPEG has failed; with neither frame visible there is
   // nothing to map a tap against.
@@ -3296,12 +3305,17 @@ function pointerToNormalized(clientX, clientY) {
   const rect = el.getBoundingClientRect();
   const vw = el === h264Frame ? el.width : el.naturalWidth;
   const vh = el === h264Frame ? el.height : el.naturalHeight;
-  if (!vw || !vh) return null;
+  if (!vw || !vh || rect.width <= 0 || rect.height <= 0) return null;
   const elAR = rect.width / rect.height, vidAR = vw / vh;
   let contentW, contentH, offX, offY;
   if (elAR >= vidAR) { contentH = rect.height; contentW = rect.height * vidAR; offX = rect.left + (rect.width - contentW)/2; offY = rect.top; }
   else               { contentW = rect.width;  contentH = rect.width / vidAR;  offX = rect.left; offY = rect.top + (rect.height - contentH)/2; }
-  const nx = (clientX - offX) / contentW, ny = (clientY - offY) / contentH;
+  return { left: offX, top: offY, width: contentW, height: contentH, aspect: vidAR };
+}
+function pointerToNormalized(clientX, clientY) {
+  const content = visibleFrameContentRect();
+  if (!content) return null;
+  const nx = (clientX - content.left) / content.width, ny = (clientY - content.top) / content.height;
   if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null;
   return { nx, ny };
 }
@@ -6112,17 +6126,80 @@ let agentActivityCursor = null, agentActivityTimer = null, agentActivityBusy = f
 function activityLine(item) {
   return (LANG === 'en' ? (item.text || item.text_zh) : (item.text_zh || item.text)) || '';
 }
+// Geometry is explicitly tagged by the server; never parse coordinates from
+// prose, guess units from magnitude, or treat screenshot pixels as runner points.
+function activityNormalizedTarget(target) {
+  const tuple = (v, n) => Array.isArray(v) && v.length === n && v.every(Number.isFinite);
+  if (!target || !tuple(target.point, 2)) return null;
+  let sx = 1, sy = 1, aspect = null;
+  if (target.coordinate_space === 'runner_points') {
+    if (!tuple(target.viewport, 2) || target.viewport.some(v => v <= 0)) return null;
+    [sx, sy] = target.viewport;
+    aspect = sx / sy;
+  } else if (target.coordinate_space !== 'normalized') return null;
+  const point = [target.point[0] / sx, target.point[1] / sy];
+  if (!point.every(v => v >= 0 && v <= 1)) return null;
+  let rect = null;
+  if (target.rect !== undefined) {
+    if (!tuple(target.rect, 4)) return null;
+    rect = target.rect.map((v, i) => v / (i % 2 === 0 ? sx : sy));
+    const [x, y, w, h] = rect;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1 || y + h > 1) return null;
+  }
+  return { point, rect, aspect };
+}
+function showAgentActivityTarget(item, remainingMs = 1200) {
+  if (!['tap', 'tap_locator', 'longpress'].includes(item.action_type)) return;
+  // No replay of a hidden tab's old actions, or a disconnected device's feed.
+  // Freshness comes from the server's monotonic TTL and the poll seq guard,
+  // not from comparing two machines' wall clocks.
+  if (document.visibilityState !== 'visible' || overlayState !== 'hidden' || !Number.isFinite(remainingMs) || remainingMs <= 0) return;
+  const target = activityNormalizedTarget(item.target);
+  const content = visibleFrameContentRect();
+  if (!target || !content) return;
+  // A rotation since dispatch makes runner geometry ambiguous. Skip it.
+  if (target.aspect !== null && Math.abs(target.aspect / content.aspect - 1) > .01) return;
+  const origin = touchLayer.getBoundingClientRect();
+  const left = content.left - origin.left, top = content.top - origin.top;
+  const add = (className, styles) => {
+    const el = document.createElement('div');
+    el.className = className;
+    el.setAttribute('aria-hidden', 'true');
+    Object.assign(el.style, styles);
+    touchLayer.append(el);
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+    setTimeout(() => el.remove(), Math.min(1200, remainingMs));
+  };
+  add('ripple agent', {
+    left: (left + target.point[0] * content.width) + 'px',
+    top: (top + target.point[1] * content.height) + 'px',
+  });
+  if (target.rect) {
+    const [x, y, w, h] = target.rect;
+    add('agent-target-rect', {
+      left: (left + x * content.width) + 'px', top: (top + y * content.height) + 'px',
+      width: (w * content.width) + 'px', height: (h * content.height) + 'px',
+    });
+  }
+}
+
 async function pollAgentActivity() {
   if (agentActivityBusy || document.visibilityState !== 'visible') return;
   agentActivityBusy = true;
   try {
     const since = agentActivityCursor ?? 0;
     const limit = agentActivityCursor === null ? 0 : 20;
-    const r = await fetch(`${BASE}/agent/activity?since=${since}&limit=${limit}`, { cache: 'no-store' });
+    const requestedAt = performance.now();
+    const r = await fetch(`${BASE}/agent/activity?since=${since}&limit=${limit}&live=${agentActivityCursor !== null}`, { cache: 'no-store' });
     if (!r.ok) return;
     const feed = await r.json();
+    const initial = agentActivityCursor === null;
     if (Number.isFinite(feed?.next)) agentActivityCursor = feed.next;
     const items = Array.isArray(feed?.items) ? feed.items : [];
+    if (initial) return;
+    const live = feed.live_target;
+    const remainingMs = live?.ttl_ms - (performance.now() - requestedAt);
+    if (live && Number.isFinite(live.seq) && live.seq > since && Number.isFinite(live.ttl_ms) && remainingMs > 0) showAgentActivityTarget(live, remainingMs);
     if (!items.length) return;
     const last = items[items.length - 1];
     const who = document.createElement('span');

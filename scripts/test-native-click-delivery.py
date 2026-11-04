@@ -54,6 +54,9 @@ final class RunnerTests {
     return Node(rect: CGRect(x: 20, y: outside ? 1500 : 200, width: 80, height: 40))
   }
   func windowSizePoints() -> CGSize { CGSize(width: 390, height: 844) }
+  // Delivery-only phases use a stub here. test-native-element-evidence.py
+  // exercises production clickElement + actionNode with disabled nodes and zero touches.
+  func actionNode(_ id: String) throws -> Node { try freshNode(id) }
   func scrollIntoView(_ id: String) throws { scrolls += 1 }
   func tapPoint(_ point: CGPoint) throws {
     touches += 1

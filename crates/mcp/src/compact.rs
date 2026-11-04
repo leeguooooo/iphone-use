@@ -6,6 +6,21 @@
 
 use serde_json::Value;
 
+/// Evidence is deliberately separate from the UI dump: a native ACK is not
+/// application success. Recovery is a fixed strategy, never parsed hint text.
+fn receipt_lines(json: &Value, out: &mut Vec<String>) {
+    if let Some(evidence) = json.get("action_evidence") {
+        let delivery = evidence.pointer("/delivery/status").and_then(Value::as_str).unwrap_or("unavailable");
+        let verified = evidence.pointer("/postcondition/status").and_then(Value::as_str).unwrap_or("unavailable");
+        out.push(format!("receipt: delivery={delivery}, postcondition={verified}; business outcome unverified"));
+    }
+    if let Some(recovery) = json.pointer("/recovery/action") {
+        if let Some(strategy) = recovery.get("next_step").and_then(Value::as_str) {
+            out.push(format!("recovery: {strategy}; retry_allowed={}", recovery.get("retry_allowed").and_then(Value::as_bool).unwrap_or(false)));
+        }
+    }
+}
+
 /// Rows listed by label in the off-screen summary before it says "…".
 const OFFSCREEN_LABELS: usize = 5;
 /// Longest label printed before it is cut.
@@ -388,6 +403,7 @@ pub fn observed(json: &Value) -> Option<String> {
         head.push_str(" · NO SCROLL PROGRESS");
     }
     let mut out = vec![head];
+    receipt_lines(json, &mut out);
     if no_scroll_progress {
         out.push("No element in the accessibility tree moved, appeared or disappeared; the only changes were values or numbers redrawn in place (a clock, a counter). The gesture may have reached a boundary, landed in another region, or been blocked by an overlay. Check a screenshot before deciding; do not keep scrolling blindly. This does not mean the list has been fully read.".to_string());
     }
@@ -712,6 +728,7 @@ pub fn failed_batch(json: &Value) -> Option<String> {
         None => {}
     }
     let mut out = vec![head];
+    receipt_lines(json, &mut out);
     if let Some(receipt) = json.get("app_lifecycle") {
         let facts = ["terminate_acknowledged", "launch_attempted"].into_iter()
             .filter_map(|key| receipt.get(key).and_then(Value::as_bool)

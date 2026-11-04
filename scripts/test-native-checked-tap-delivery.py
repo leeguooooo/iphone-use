@@ -35,6 +35,8 @@ final class RouteProbe {
   var touches = 0
   init(_ scenario: Int) { self.scenario = scenario }
   func windowSizePoints() -> CGSize { CGSize(width:390,height:844) }
+  // Actionability is tested separately; keep these delivery-phase fixtures isolated.
+  func actionNode(_ id: String) throws -> Node { try freshNode(id) }
   func freshNode(_ id: String) throws -> Node {
     if scenario == 3 { throw RunnerError.staleElement(id) }
     return Node(attributes:["rawIdentifier":scenario == 1 ? "race.replaced" : "race.target",

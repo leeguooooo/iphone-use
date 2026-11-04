@@ -128,7 +128,16 @@ simulator start` again.
 `daemon`, blockers are resolved, and no release/reconnect is in progress. Send
 it once, then poll status until `drivable:true` (MCP: `phone_reconnect` with
 `wait_secs`, e.g. 180, does the polling and returns `wait.outcome`
-`drivable` / `blocked` / `timeout` with the compact final status):
+`drivable` / `blocked` / `retrying` / `stopped` / `timeout` with the compact
+final status). After a failed setup round, status carries `setup_retry`
+(`{kind, attempt, next_in_secs}`) while the supervisor has its own retry
+scheduled; a blocker it is about to retry (a Wi-Fi tunnel that was briefly
+not found) often clears with no one touching the phone. The wait keeps going
+across such a retry, and returns `retrying` when the retry is due within a
+minute but after the wait would end: check status after `next_in_secs` before
+asking a person to plug in or unlock the phone. A retry further out than a
+minute (a slow backoff), or a blocker that held for 20 s across one retry,
+returns `blocked`:
 
 ```bash
 curl -s -H "$AUTH" -H "$MUTATION" -H 'Content-Type: application/json' \
@@ -367,6 +376,12 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"launch_app","app":"微信"}                       // any app's exact name, or a loose name that starts a word of exactly ONE installed app ("idol ludo" → Idol Ludo Board); the step result's `resolved` {app,name,bundle_id,match} says which; 422 ambiguous_app|app_not_found|app_not_installed (+candidates), nothing sent
 {"type":"open_url","url":"https://example.com/page"}    // http/https always; other schemes only if the owner allows them (403 url_scheme_not_allowed)
 {"type":"tap","element":3,"snapshot":"…"}               // from the SAME elements read
+// A token from an older read of the SAME screen still works when the screen only changed a little
+// (clock, badge, a switch you just flipped, keyboard): the row is found again by kind + identifier +
+// label + enclosing rows, never by value or frame. Another app, another page (navigation bar differs),
+// a new alert/sheet, most rows replaced, or a row with no label/identifier → 409 stale_element_snapshot;
+// two look-alikes nothing tells apart → ambiguous. Either way nothing is sent: read again.
+// When it does act on a changed screen, the result carries "rebound":{"from":3,"to":4} (old index → live index).
 {"type":"tap","label":"新备忘录"}                         // exact, unique; add "kind":"Button" if a StaticText shares it
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
 {"type":"tap","x":0.5,"y":0.3}                          // last resort
@@ -972,11 +987,11 @@ worked example below.
 
 ## MCP specifics
 
-40 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_read_value`, `phone_reconnect`, `phone_hold`,
+42 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_read_value`, `phone_reconnect`, `phone_hold`,
 `phone_release_owner`, `phone_login`, `phone_apps`, `phone_screenshot`, `phone_elements`, `phone_home_layout`, `phone_instances`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
-`phone_run_start`, `phone_run_end`, `phone_flow_list / info / run / draft /
+`phone_run_start`, `phone_run_end`, `phone_run_trace`, `phone_subtree`, `phone_flow_list / info / run / draft /
 update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
 `phone_set_location`, `phone_record`, `phone_install_app`, `phone_app_notes`.
 
@@ -1412,7 +1427,11 @@ Two helpers for Mode A:
   centre of its `rect` by coordinates (divide by `screen` for the 0–1
   fractions), never by `element`. It runs Apple's Vision on a fresh
   screenshot (macOS; the first use compiles a small helper and can take
-  longer). A failure is `ocr_error` beside a normal answer, never a failed read.
+  longer). A failure is `ocr_error` beside a normal answer, never a failed read,
+  with `ocr_status`: `warming` (Vision was cold after idle; the read stopped
+  waiting after 10 s but the recognition keeps going, so retry after
+  `ocr_retry_after_ms`), `busy` (an earlier run is still going; retry soon) or
+  `failed`. `ocr_ms` is the time OCR added to the read.
 - **Numbered screenshot.** `GET /agent/screenshot?overlay=elements` outlines
   each interactive element and draws its index in a magenta badge, so you can
   say "tap 12" from the picture: `{"type":"tap","element":12,"snapshot":…}`
@@ -1612,3 +1631,80 @@ upgrade. It never carries a value or promotes a snapshot preview.
 
 Only a successful, validated complete-value contract can report a complete null
 or empty value. An unavailable attribute is evidence of neither.
+
+## Action evidence and recovery
+
+Input and batch responses add `action_evidence` without changing `ok`, `outcome`,
+`batch_outcome` or `retry_safe`. `delivery.status` is `not_sent`, `delivered`,
+`partial`, `uncertain` or `unavailable`. `postcondition.status` separately says
+`verified`, `unverified` or `unavailable`. A native acknowledgement is delivery
+only. A readable `set_value` match verifies the element value; it does not prove
+that the application saved or submitted it. Secure fields stay unverified. A
+successful terminal `wait_for` verifies its UI expectation only. The existing
+`alert` block accompanies observed actions; no alert block does not prove that
+no alert exists.
+
+Errors also carry `recovery.action`: `next_step` is a fixed strategy,
+`retry_allowed` is permission to reassess a retry only when the whole request was certainly
+not delivered. Partial batches and uncertain writes require reading the live
+state and deciding where to resume. Never branch on `hint` wording.
+
+### Waiting for a delayed loader
+
+Add `absent_after_present:true` inside a `wait_for` expectation when a negative
+target must first appear before its absence can count:
+
+```json
+{"kind":"wait_for","expect":{"absent":[{"label":"Loading"}],"absent_after_present":true},"timeout_ms":10000}
+```
+
+Every absent selector needs its own positive observation in this wait; this
+also works with `ocr_absent`. Unknown/partial reads never prove disappearance.
+A loader that never appears times out. Omit the option for an ordinary absence
+check. This option requires a nonzero timeout and at least one negative target.
+
+### Reading one element's subtree
+
+`POST /agent/subtree` (`phone_subtree`) accepts `snapshot`, `element`,
+`max_depth` (default 8, range 1–64) and `max_nodes` (default 500, range 1–5000).
+The daemon resolves a unique semantic target, then requests only that native
+AX element's subtree. Locator resolution may still read the application tree.
+The reply includes `rows`, `coverage`, `complete` and `partial`; a capped read
+must not be used as proof of absence. Older runners return
+`subtree_not_supported`; no global source read is silently substituted.
+
+These rows have **local, read-only positions**, not action refs. The reply
+carries no actionable snapshot token. Use a unique locator or get new full
+`phone_elements` refs before input. Other regions' snapshot refs are unchanged.
+
+### Native action checks
+
+The updated runner samples only the target element's frame before element
+clicks, text edits and adjustments. Disabled targets, positively noneditable
+editors, unavailable frames and frames that keep moving refuse before input.
+Missing enabled/editable metadata stays unknown, not false. The bounded frame
+samples run on the phone, not as repeated whole-screen network reads. These
+checks require updating the runner; a daemon-only update cannot add them to an
+older runner. Coordinate-only actions cannot prove a semantic target's enabled
+or editable state.
+
+### Watching and inspecting a run
+
+The control panel shows nonsensitive named element targets in green: a ripple and, when available,
+an outline. Element geometry is a snapshot's rectangle centre, not proof of the
+actual dispatched hit point. Runner-point targets are drawn only with a known
+runner viewport. Unresolved, stale and historical targets are not animated. Activity history never contains point/rect geometry. The panel explicitly requests live=true; only the latest eligible target is exposed as live_target, bound to the active owner/privacy/lifecycle scope and erased after 1.5 seconds. Private mode and ownership changes clear it; live responses use no-store and a publication scope fence. Each live target carries ttl_ms remaining at response construction; the panel subtracts the request duration using its own monotonic clock and never compares sender/browser wall clocks. Arbitrary coordinate taps, keypad keys and input fields have no geometry even in live feedback.
+
+`POST /agent/run {"action":"start","run_id":"task-1","trace":true}`
+(or `phone_run_start(trace=true)`) opts into a redacted action timeline. This
+`trace` option is independent of `complete_trace`, which counts model turns.
+End with the usual run end. Lease release, expiry/reclaim or takeover ends the prior owner's active trace while preserving export; start a fresh run ID to trace again. Read it with
+`GET /agent/trace?run_id=task-1` (`phone_run_trace`), or add `format=jsonl` for
+newline-delimited JSON export. Export requires the same authenticated owner.
+
+The timeline stores action kinds, bounded numerical target metadata, delivery,
+verification and counts. It does not store typed values, labels, URLs,
+screenshots or arbitrary runner messages. Private/revoked requests add no event.
+It is bounded memory (16 runs, 200 events/run), reports dropped events and is
+lost on restart or eviction. It supports reviewing what happened, not automatic
+replay of mutations. Tracing is off by default.

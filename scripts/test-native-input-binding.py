@@ -42,6 +42,7 @@ final class UINode {
   var type = "XCUIElementTypeTextField"
   var isFocused = true
   var isEnabled: Bool? = true
+  var editableState: Bool?
   var pid: Int32 = 42
   var axElement: AnyObject? = NSObject()
   var treeComplete = true
@@ -116,6 +117,9 @@ final class RunnerTests {
   func freshNode(_ id:String) throws -> UINode {
     guard let node = elements.entries[id] else { throw RunnerError.failed("stale") }; return node
   }
+  // Polling and optional AX state transport have dedicated element-evidence tests.
+  func actionNode(_ id:String, editing:Bool) throws -> UINode { try freshNode(id) }
+  func editableEvidence(_ node:UINode) -> Bool? { node.editableState }
   func fullElementValue(_ id:String, limit:Int) throws -> [String:Any] { fullValue }
   func typeIntoFocus(_ text:String, frequency:UInt, mapKeys:Bool = true, targetPID:Int32?) throws -> String {
     precondition(targetPID == 42); sends += 1; lastMapKeys = mapKeys
@@ -250,6 +254,12 @@ for body: [String:Any] in [[:],["multiline":1],["multiline":"false"]] {
   let r=RunnerTests();let selected=r.elements.register(r.node);focusTaps=0
   refused({_ = try r.selectedInputTarget(selected,HTTPRequest(body:body))},status:400,"invalid selected target body refuses")
   check(focusTaps == 0 && r.sends == 0,"invalid target body never dispatches")
+}
+do {
+  let r=RunnerTests(); let token=r.elements.register(r.node); r.inputBinding=token
+  r.node.editableState=false
+  refused({_ = try r.boundKeys("blocked",token:token,frequency:60)},status:400,"explicit read-only binding refuses text")
+  check(r.sends == 0,"read-only target received input")
 }
 print("Native input binding: \(checks) production-logic checks passed; synthetic services only")
 '''

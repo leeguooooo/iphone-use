@@ -77,6 +77,7 @@ pub fn app_state(inputs: StateInputs<'_>) -> Arc<AppState> {
         live_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         mjpeg_stream_activity: Arc::new(Mutex::new(std::collections::HashMap::new())),
         element_snapshots: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        action_traces: Arc::new(Mutex::new(crate::action_trace::TraceStore::default())),
         owner_snapshots: Arc::new(Mutex::new(std::collections::HashMap::new())),
         flow_trail: Arc::new(Mutex::new(crate::flows::FlowTrail::default())),
         agent_focus: Arc::new(Mutex::new(crate::focus::AgentFocus::load(

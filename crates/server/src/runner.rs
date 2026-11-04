@@ -27,6 +27,7 @@ fn bounded_move_duration_ms(duration_ms: u64) -> u64 {
 /// *entire* observation vanish — a reachable runner then reported `runner:false`
 /// for the whole reconnect and setup-runner.sh's hand-off verdict failed on it.
 const ACTIONABILITY_PROBE_BUDGET: Duration = Duration::from_secs(10);
+const WINDOW_SIZE_TTL: Duration = Duration::from_secs(30);
 
 /// Budget for the session-less `GET /wda/locked` that precedes session
 /// creation in `probe_health`. It is a plain in-process read on the runner.
@@ -104,6 +105,12 @@ pub(crate) fn post_mutates_screen(path: &str) -> bool {
         || path.ends_with("/elements") || path.ends_with("/element"))
 }
 
+/// How many complete trees [`RunnerClient::served_tree`] can look back over.
+/// An agent acts on a tree it read moments ago; a few cover a batch.
+const SERVED_TREES_CAP: usize = 8;
+
+type ReadScope = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A runner endpoint plus a lazily-created session id.
 pub struct RunnerClient {
     base: String, // e.g. "http://192.168.0.190:8100"
@@ -128,6 +135,8 @@ pub struct RunnerClient {
     /// runner). Asked again whenever a new session starts (a new runner).
     device_settle: Option<bool>,
     value_read: bool,
+    element_subtree: bool,
+    element_evidence: bool,
     guarded_input: bool,
     selected_input_target: bool,
     input_continuation: bool,
@@ -137,6 +146,16 @@ pub struct RunnerClient {
     /// The last tree read and when: snapshot-bound actions reuse it instead
     /// of reading the whole tree again (see [`Self::recent_tree`]).
     last_tree: Option<(std::sync::Arc<Vec<ElementRow>>, std::time::Instant)>,
+    /// The last few complete trees read, newest last. A snapshot-bound action
+    /// whose token no longer matches the live tree looks its snapshot up here
+    /// to learn which element the index named (see [`Self::served_tree`]).
+    /// Each keeps the authorization it was read under, so a tree read before
+    /// an owner change or a privacy hold is never used afterwards.
+    served_trees: std::collections::VecDeque<(std::sync::Arc<Vec<ElementRow>>, Option<ReadScope>)>,
+    /// `(snapshot index, live index)` when the current snapshot-bound action
+    /// found its row in a changed tree; the response reports it.
+    pub rebound_row: Option<(usize, usize)>,
+    pub(crate) activity_rebound_rect: Option<[f64;4]>,
     /// Whether the last [`Self::elements`] kept the tree read without
     /// `isVisible` (see [`Self::bounded_source`]): its rows' `visible` is
     /// geometric, and the next read keeps that mode until the tree shrinks
@@ -382,6 +401,8 @@ impl RunnerClient {
             no_alert_at: None,
             device_settle: None,
             value_read: false,
+            element_subtree: false,
+            element_evidence: false,
             guarded_input: false,
             selected_input_target: false,
             input_continuation: false,
@@ -389,6 +410,9 @@ impl RunnerClient {
             volume_buttons: false,
             system_capture_request: false,
             last_tree: None,
+            served_trees: std::collections::VecDeque::new(),
+            rebound_row: None,
+            activity_rebound_rect: None,
             lite_source: false,
             probe: ProbeMemory::default(),
             full_visibility: full_visibility_requested(),
@@ -754,6 +778,10 @@ impl RunnerClient {
                 .and_then(|value| value.pointer("/value/capabilities/ipu:selectedInputTarget").and_then(serde_json::Value::as_bool)) == Some(true);
             self.value_read = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:valueRead").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.element_subtree = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:elementSubtree").and_then(serde_json::Value::as_bool)) == Some(true);
+            self.element_evidence = serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|value| value.pointer("/value/capabilities/ipu:elementEvidence").and_then(serde_json::Value::as_bool)) == Some(true);
             self.volume_buttons = serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|value| value.pointer("/value/capabilities/ipu:volumeButtons").and_then(serde_json::Value::as_bool)) == Some(true);
             self.system_capture_request = serde_json::from_str::<serde_json::Value>(&text).ok()
@@ -1039,6 +1067,53 @@ impl RunnerClient {
         let response=self.http.get(format!("{}/session/{}/element/{}/value?complete=1",self.base,sid,id))
             .query(&[("max_utf16",max_utf16)]).send_signed(&self.auth).await?;
         ensure_runner_success(response,"GET element value").await
+    }
+
+    /// Fetch only the retained AX element's bounded subtree on the phone.
+    /// Rows are read-only local indices: they are NOT saved in the screen-token
+    /// cache. Keep the original snapshot/locator to address later actions.
+    /// Legacy runners explicitly refuse; never fetch /source as a substitute.
+    pub async fn element_subtree(
+        &mut self, element_id: &str, max_depth: u32, max_nodes: u32,
+    ) -> Result<ElementSubtree> {
+        if !(1..=64).contains(&max_depth) || !(1..=5000).contains(&max_nodes) {
+            return Err(anyhow!("subtree requires max_depth in 1..=64 and max_nodes in 1..=5000"));
+        }
+        let sid = self.ensure_session().await?.to_owned();
+        if !self.element_subtree {
+            return Err(unsupported_element_read("GET element subtree", "ipu:elementSubtree"));
+        }
+        let mut url = reqwest::Url::parse(&format!("{}/session/", self.base))?;
+        url.path_segments_mut().map_err(|_| anyhow!("runner base cannot hold path segments"))?
+            .pop_if_empty().extend([sid.as_str(), "element", element_id, "ipu", "subtree"]);
+        let response = self.http.get(url)
+            .query(&[("max_depth", max_depth), ("max_nodes", max_nodes)])
+            .send_signed(&self.auth).await.context("GET element subtree")?;
+        let coverage = SnapshotCoverage::from_headers(response.headers());
+        let root = ensure_runner_success(response, "GET element subtree").await?;
+        if !root.is_object() { return Err(anyhow!("element subtree must return a tree object")); }
+        let mut rows = Vec::new();
+        flatten_tree(&root, 0, &mut rows);
+        Ok(ElementSubtree { root, rows, coverage })
+    }
+
+    /// One shallow element read, or at most four frame samples polled inside
+    /// the phone. Missing attributes are None, never evidence of true/false.
+    /// Does not mutate, retry input, fetch a whole tree, or update screen tokens.
+    pub async fn element_evidence(
+        &mut self, element_id: &str, stability: bool,
+    ) -> Result<ElementEvidence> {
+        let sid = self.ensure_session().await?.to_owned();
+        if !self.element_evidence {
+            return Err(unsupported_element_read("GET element evidence", "ipu:elementEvidence"));
+        }
+        let mut url = reqwest::Url::parse(&format!("{}/session/", self.base))?;
+        url.path_segments_mut().map_err(|_| anyhow!("runner base cannot hold path segments"))?
+            .pop_if_empty().extend([sid.as_str(), "element", element_id, "ipu", "evidence"]);
+        let response = self.http.get(url).query(&[("stability", if stability { "1" } else { "0" })])
+            .send_signed(&self.auth).await.context("GET element evidence")?;
+        let value = ensure_runner_success(response, "GET element evidence").await?;
+        serde_json::from_value(value).context("parse element evidence")
     }
 
     /// Request one iOS system capture under a live screen/owner permit;
@@ -1896,14 +1971,17 @@ impl RunnerClient {
         Ok(())
     }
 
-    /// Window (screen) size in runner points — needed to map our normalized
-    /// `[0,1]` agent coordinates onto [`Self::tap_point`]'s absolute points.
+    /// Authoritative cached runner dimensions, without a network request.
+    pub fn cached_window_size(&self) -> Option<(f64, f64)> {
+        self.window.filter(|(_, at)| at.elapsed() < WINDOW_SIZE_TTL).map(|(size, _)| size)
+    }
+
+    /// Window size in runner points for mapping normalized coordinates.
     pub async fn window_size(&mut self) -> Result<(f64, f64)> {
         // Every tree read refreshes this from the Application frame (see
         // `elements`), so the TTL only matters between reads; a rotation shows
         // up in the next read. Measured on real sessions: the 3 s TTL re-read
         // the size on almost every request (~0.24 s each, 6.8 % of runner time).
-        const WINDOW_SIZE_TTL: Duration = Duration::from_secs(30);
         if let Some((size, at)) = self.window {
             if at.elapsed() < WINDOW_SIZE_TTL {
                 return Ok(size);
@@ -2463,6 +2541,13 @@ impl RunnerClient {
         }
         self.last_tree = SnapshotCoverage::from_tree(tree).is_complete()
             .then(|| (std::sync::Arc::new(rows.clone()), std::time::Instant::now()));
+        if let Some((tree, _)) = &self.last_tree {
+            let scope = self.tree_scope.clone().or_else(|| self.observation_scope.clone());
+            self.served_trees.push_back((tree.clone(), scope));
+            while self.served_trees.len() > SERVED_TREES_CAP {
+                self.served_trees.pop_front();
+            }
+        }
         rows
     }
 
@@ -2569,6 +2654,23 @@ impl RunnerClient {
         (untouched && read_at.elapsed() < max_age).then(|| rows.clone())
     }
 
+    /// The newest recently read complete tree that `is_snapshot` accepts (the
+    /// caller matches its snapshot token). Unlike [`Self::recent_tree`] it may
+    /// predate later actions: it says which element an old index named, never
+    /// what the screen shows now.
+    pub fn served_tree(
+        &self,
+        is_snapshot: impl Fn(&[ElementRow]) -> bool,
+    ) -> Option<std::sync::Arc<Vec<ElementRow>>> {
+        if self.tree_scope.as_ref().or(self.observation_scope.as_ref()).is_some_and(|allowed| !allowed()) { return None; }
+        self.served_trees
+            .iter()
+            .rev()
+            .filter(|(_, scope)| scope.as_ref().is_none_or(|allowed| allowed()))
+            .find(|(rows, _)| is_snapshot(rows))
+            .map(|(rows, _)| rows.clone())
+    }
+
     pub fn settle_frames_usable(&self) -> bool {
         self.settle_frames_paused_until
             .is_none_or(|until| std::time::Instant::now() >= until)
@@ -2607,7 +2709,12 @@ impl RunnerClient {
     }
 
     pub fn bind_observation_scope(&mut self, allowed: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {
+        // Trees already served stay: each lapses on its own scope, and a batch
+        // or an observed action must not forget the snapshot its steps name.
+        let mut served = std::mem::take(&mut self.served_trees);
+        served.retain(|(_, scope)| scope.is_some());
         self.forget_observations();
+        self.served_trees = served;
         self.tree_scope = None;
         self.observation_scope = Some(allowed);
     }
@@ -2624,7 +2731,9 @@ impl RunnerClient {
 
     /// Discard screen-derived data after the caller's authorization scope changes.
     pub fn forget_observations(&mut self) {
+        self.activity_rebound_rect=None;
         self.last_tree = None;
+        self.served_trees.clear();
         self.settled_frame = None;
         self.no_alert_at = None;
     }
@@ -2846,8 +2955,11 @@ impl RunnerClient {
     /// Drop the cached session (e.g. after an error that suggests it went
     /// stale); the next call re-creates one via [`Self::ensure_session`].
     pub fn invalidate_session(&mut self) {
+        self.activity_rebound_rect=None;
         self.session = None;
         self.value_read = false;
+        self.element_subtree = false;
+        self.element_evidence = false;
         self.guarded_input = false;
         self.selected_input_target = false;
         self.input_continuation = false;
@@ -2857,6 +2969,7 @@ impl RunnerClient {
         self.window = None;
         self.no_alert_at = None;
         self.last_tree = None;
+        self.served_trees.clear();
     }
 
     /// Drop the cached window size, returning it: the next gesture reads the
@@ -3212,6 +3325,38 @@ pub struct ElementMatches {
 pub struct ElementSnapshot {
     pub rows: Vec<ElementRow>,
     pub coverage: SnapshotCoverage,
+}
+
+/// Indices in `rows` are local to this read, never actionable screen refs.
+pub struct ElementSubtree {
+    pub root: serde_json::Value,
+    pub rows: Vec<ElementRow>,
+    pub coverage: SnapshotCoverage,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ElementEvidence {
+    pub enabled: Option<bool>,
+    pub editable: Option<bool>,
+    pub stable: Option<bool>,
+    pub rect: ElementEvidenceRect,
+    pub samples: u32,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ElementEvidenceRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+fn unsupported_element_read(operation: &str, capability: &str) -> anyhow::Error {
+    RunnerHttpError {
+        operation: operation.into(), status: reqwest::StatusCode::NOT_IMPLEMENTED,
+        code: Some("unsupported operation".into()),
+        message: Some(format!("runner lacks {capability}; no whole-screen fallback")),
+    }.into()
 }
 
 /// One row of the flattened element tree.
@@ -3899,11 +4044,13 @@ impl RunnerHttpError {
     /// The runner said it refused the request before acting on the phone.
     /// Its `/actions` route checks every touch point against the screen
     /// before it synthesizes anything, and that refusal (HTTP 400, "invalid
-    /// argument") ends "nothing was sent". A 400 alone proves nothing: the
+    /// argument") ends "nothing was sent". Element actionability refusals
+    /// use "invalid element state" with the same explicit no-dispatch suffix.
+    /// A 400 alone proves nothing: the
     /// same status can follow touches already played.
     pub fn nothing_sent(&self) -> bool {
         self.status == reqwest::StatusCode::BAD_REQUEST
-            && self.code.as_deref() == Some("invalid argument")
+            && matches!(self.code.as_deref(), Some("invalid argument" | "invalid element state"))
             && self
                 .message
                 .as_deref()
@@ -4061,6 +4208,123 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn unlabeled_app_root_still_supplies_cached_viewport() {
+        let mut client=RunnerClient::new("http://127.0.0.1:9").unwrap();
+        let rows=client.rows_from_tree(&serde_json::json!({"type":"XCUIElementTypeApplication","rect":{"x":0,"y":0,"width":440,"height":956},"children":[{"type":"XCUIElementTypeButton","label":"Done"}]}), false);
+        assert!(!rows.iter().any(|row|row.kind=="Application"));
+        assert_eq!(client.cached_window_size(),Some((440.0,956.0)));
+    }
+
+    #[test]
+    fn element_reads_require_explicit_session_capabilities() {
+        for capability in [serde_json::json!({}), serde_json::json!({"ipu:elementSubtree": false, "ipu:elementEvidence": false})] {
+            let (base, task) = mock_runner(2, move |request| {
+                if request.starts_with("POST /session ") {
+                    return serde_json::json!({"value":{"sessionId":"S","capabilities":capability}}).to_string();
+                }
+                assert!(request.starts_with("POST /session/S/appium/settings "), "{request}");
+                r#"{"value":null}"#.into()
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            let subtree = block(client.element_subtree("E", 2, 10)).err().unwrap();
+            let evidence = block(client.element_evidence("E", true)).err().unwrap();
+            for error in [subtree, evidence] {
+                let error = error.downcast_ref::<RunnerHttpError>().unwrap();
+                assert_eq!(error.status, reqwest::StatusCode::NOT_IMPLEMENTED);
+                assert_eq!(error.code.as_deref(), Some("unsupported operation"));
+            }
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn subtree_preserves_provider_coverage_without_screen_cache() {
+        for (headers, expected) in [
+            ("X-IPU-Truncated: 0\r\nX-IPU-Tree-Complete: 1\r\n", SnapshotCoverage::Complete),
+            ("X-IPU-Truncated: 1\r\nX-IPU-Tree-Complete: 1\r\n", SnapshotCoverage::Truncated),
+            ("", SnapshotCoverage::Unknown),
+        ] {
+            let (base, task) = mock_runner(1, move |request| {
+                assert!(request.starts_with("GET /session/S/element/E%2Fchild/ipu/subtree?max_depth=3&max_nodes=10 "), "{request}");
+                let body = r#"{"value":{"type":"XCUIElementTypeCell","rect":{"x":0,"y":0,"width":20,"height":20},"children":[{"type":"XCUIElementTypeButton","label":"Inside","rect":{"x":1,"y":1,"width":10,"height":10}}]}}"#;
+                format!("HTTP/1.1 200 OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("S".into());
+            client.element_subtree = true;
+            let result = block(client.element_subtree("E/child", 3, 10)).unwrap();
+            assert_eq!(result.coverage, expected);
+            assert_eq!(result.root["type"], "XCUIElementTypeCell");
+            assert!(result.rows.iter().any(|row| row.label == "Inside"));
+            assert!(client.last_tree.is_none());
+            assert!(client.served_trees.is_empty());
+            assert!(client.window.is_none());
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn element_evidence_retains_unknown_and_false() {
+        for stability in [false, true] {
+            let (base, task) = mock_runner(1, move |request| {
+                let expected = if stability { "1" } else { "0" };
+                assert!(request.starts_with(&format!("GET /session/S/element/E/ipu/evidence?stability={expected} ")), "{request}");
+                r#"{"value":{"enabled":false,"editable":null,"rect":{"x":1,"y":2,"width":3,"height":4},"samples":1}}"#.into()
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("S".into()); client.element_evidence = true;
+            let result = block(client.element_evidence("E", stability)).unwrap();
+            assert_eq!(result.enabled, Some(false));
+            assert_eq!(result.editable, None); assert_eq!(result.stable, None);
+            assert_eq!(result.samples, 1);
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn element_read_failures_never_retry_or_fetch_source() {
+        for subtree in [false, true] {
+            let (base, task) = mock_runner(1, move |request| {
+                let endpoint = if subtree { "subtree" } else { "evidence" };
+                assert!(request.contains(&format!("/element/E/ipu/{endpoint}?")), "{request}");
+                http_400(r#"{"value":{"error":"unsupported operation","message":"AX unavailable"}}"#)
+            });
+            let mut client = RunnerClient::new(base).unwrap();
+            client.session = Some("S".into()); client.element_subtree = true; client.element_evidence = true;
+            if subtree { assert!(block(client.element_subtree("E", 2, 10)).is_err()); }
+            else { assert!(block(client.element_evidence("E", true)).is_err()); }
+            task.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_subtree_limits_do_not_contact_runner() {
+        let mut client = RunnerClient::new("http://127.0.0.1:1").unwrap();
+        for (depth, count) in [(0,10),(65,10),(2,0),(2,5001)] {
+            assert!(block(client.element_subtree("E",depth,count)).is_err());
+            assert!(client.session.is_none());
+        }
+    }
+
+    #[test]
+    fn native_actionability_refusal_requires_explicit_no_dispatch_proof() {
+        for (status, message, expected) in [
+            (400, "element is disabled; nothing was sent", true),
+            (400, "element frame is unstable or unavailable; nothing was sent", true),
+            (400, "element is not editable; nothing was sent", true),
+            (400, "invalid element state after input", false),
+            (500, "element is disabled; nothing was sent", false),
+        ] {
+            let error = RunnerHttpError {
+                operation: "POST element/click".into(),
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                code: Some("invalid element state".into()), message: Some(message.into()),
+            };
+            assert_eq!(error.nothing_sent(), expected, "{error}");
+        }
+    }
 
     // Selected target capability failures never authorize an alternate input path.
     #[test]

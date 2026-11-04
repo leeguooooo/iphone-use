@@ -57,6 +57,8 @@ extension RunnerTests {
       if match(parts, "wda/input-target") != nil { return try inputTarget(request) }
       if match(parts, "status") != nil { return .value(statusValue(), sessionId: Self.sessionID) }
       if match(parts, "source") != nil { return try source(request) }
+      if let id = match(parts, "element/:id/ipu/subtree")?.first { return try elementSubtree(id, request) }
+      if let id = match(parts, "element/:id/ipu/evidence")?.first { return try elementEvidence(id, request) }
       if match(parts, "screenshot") != nil { return try screenshot(request) }
       if match(parts, "window/size") != nil { return windowSize() }
       if match(parts, "window/rect") != nil {
@@ -158,6 +160,8 @@ extension RunnerTests {
       "sdkVersion": Self.systemVersion,
       "ipu:timedDragPath": true,
       "ipu:valueRead": true,
+      "ipu:elementSubtree": true,
+      "ipu:elementEvidence": true,
       "ipu:guardedInput": guardedInput,
       "ipu:selectedInputTarget": guardedInput && IPURBridge.focusRecoveryAvailable(),
       "ipu:inputContinuation": guardedInput,
@@ -246,7 +250,7 @@ extension RunnerTests {
     guard let stored = elements.node(id) else { throw RunnerError.staleElement(id) }
     guard let axElement = stored.axElement else { return stored }
     let tree = IPURBridge.runnerTree(
-      forAXElement: axElement, maxDepth: depth, maxNodes: Self.defaultMaxNodes,
+      forAXElement: axElement, maxDepth: depth, maxNodes: depth == 1 ? 1 : Self.defaultMaxNodes,
       extensionCallLimit: depth > 1 ? Self.defaultExtensionCalls : 0, rememberKey: nil,
       includeElements: true)
     guard (tree[IPURTreeOkKey] as? Bool) == true, let root = tree[IPURTreeRootKey] as? [String: Any] else {
@@ -257,6 +261,81 @@ extension RunnerTests {
     // A zero frame on a re-read means the element left the hierarchy.
     if node.rect == .zero, stored.rect != .zero { throw RunnerError.staleElement(id) }
     return node
+  }
+
+  /// A scoped read must have a live handle. Never return a cached prefix or
+  /// fall back to a public app snapshot when private AX is unavailable.
+  private func liveElement(_ id: String) throws -> UINode {
+    guard let stored = elements.node(id) else { throw RunnerError.staleElement(id) }
+    guard let ax = stored.axElement else {
+      throw RunnerError(status: 501, code: "unsupported operation", message: "element has no live AX handle")
+    }
+    guard stored.pid > 0, IPURBridge.pid(forAXElement: ax) == stored.pid else { throw RunnerError.staleElement(id) }
+    return stored
+  }
+
+  private func elementSubtree(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
+    func limit(_ key: String, fallback: Int, cap: Int) throws -> Int {
+      guard let text = request.query[key] else { return fallback }
+      guard let value = Int(text), (1...cap).contains(value) else {
+        throw RunnerError.invalidArgument("\(key) must be in 1...\(cap)")
+      }
+      return value
+    }
+    let depth = try limit("max_depth", fallback: 8, cap: Self.defaultMaxDepth)
+    let count = try limit("max_nodes", fallback: 256, cap: Self.defaultMaxNodes)
+    let stored = try liveElement(id)
+    let tree = IPURBridge.runnerTree(forAXElement: stored.axElement!, maxDepth: depth,
+      maxNodes: count, extensionCallLimit: 0, rememberKey: nil)
+    guard tree[IPURTreeOkKey] as? Bool == true, let root = tree[IPURTreeRootKey] as? [String: Any] else {
+      throw RunnerError.failed("element subtree AX read unavailable; no whole-screen fallback")
+    }
+    let node = UINode(raw: root, parent: nil, pid: stored.pid)
+    if node.rect == .zero, stored.rect != .zero { throw RunnerError.staleElement(id) }
+    var headers = treeHeaders(tree, backend: "private-ax-subtree", pid: stored.pid)
+    headers["X-IPU-Scope"] = "element"
+    return .value(root, headers: headers)
+  }
+
+  private func observeElement(_ id: String, stability: Bool) throws -> (node: UINode, stable: Bool?, samples: Int) {
+    _ = try liveElement(id)
+    if !stability { return (try freshNode(id), nil, 1) }
+    return try ElementFrameStability.observe(read: {
+      IPURBridge.invalidateRequestCache()
+      _ = try self.liveElement(id)
+      return try self.freshNode(id)
+    }, wait: { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.025)) })
+  }
+
+  private func editableEvidence(_ node: UINode) -> Bool? {
+    if let state = node.editableState { return state }
+    guard let ax = node.axElement else { return nil }
+    return IPURBridge.editableState(for: ax)?.boolValue
+  }
+
+  private func elementEvidence(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
+    guard request.query["stability"] == nil || ["0", "1"].contains(request.query["stability"]!) else {
+      throw RunnerError.invalidArgument("stability must be 0 or 1")
+    }
+    let result = try observeElement(id, stability: request.query["stability"] == "1")
+    return .value([
+      "enabled": result.node.isEnabled.map { $0 as Any } ?? NSNull(),
+      "editable": editableEvidence(result.node).map { $0 as Any } ?? NSNull(),
+      "stable": result.stable.map { $0 as Any } ?? NSNull(),
+      "rect": rectValue(result.node.rect), "samples": result.samples,
+    ])
+  }
+
+  /// Only element-directed actions pay for shallow frame polling. No tree,
+  /// screenshot, hittability query, or mutation is repeated here.
+  private func actionNode(_ id: String, editing: Bool = false) throws -> UINode {
+    let result = try observeElement(id, stability: true)
+    try ElementFrameStability.requireState(result.node,
+      editable: editing ? editableEvidence(result.node) : nil, editing: editing)
+    guard result.stable == true else {
+      throw RunnerError(status: 400, code: "invalid element state", message: "element frame is unstable or unavailable; nothing was sent")
+    }
+    return result.node
   }
 
   // MARK: - Finding elements
@@ -367,8 +446,10 @@ extension RunnerTests {
   }
 
   private func focusReplacementTarget(_ token: String, original: UINode) throws -> (node: UINode, tapped: Bool) {
-    let before = try checkedReplacementTarget(token, original: original, requireFocus: false)
+    var before = try checkedReplacementTarget(token, original: original, requireFocus: false)
     if before.isFocused { return (before, false) }
+    before = try actionNode(token, editing: true)
+    _ = try checkedReplacementTarget(token, original: original, requireFocus: false)
     guard replacementFocusPointAllowed(token, original: original, point: before.center) else {
       throw RunnerError.failed("replacement original focus point occluded or scene unavailable; nothing was tapped")
     }
@@ -441,6 +522,9 @@ extension RunnerTests {
         enabled: node.isEnabled, pid: node.pid, foregroundPID: foreground().pid,
         live: node.axElement != nil) {
       throw RunnerError.invalidArgument("\(reason); nothing was sent")
+    }
+    if editableEvidence(node) == false {
+      throw RunnerError.invalidArgument("input_target_not_editable; nothing was sent")
     }
   }
 
@@ -568,7 +652,7 @@ extension RunnerTests {
     do {
       let plan = try CheckedElementTap(request.jsonObject())
       let screen = windowSizePoints()
-      let node = try freshNode(id)
+      let node = try actionNode(id)
       guard node.axElement != nil else {
         throw RunnerError(status: 409, code: "target changed", message: "live target unavailable; no tap sent")
       }
@@ -586,7 +670,7 @@ extension RunnerTests {
   }
 
   private func clickElement(_ id: String) throws -> HTTPResponse {
-    var node = try freshNode(id)
+    var node = try actionNode(id)
     guard node.rect.width > 0, node.rect.height > 0 else {
       throw RunnerError.failed("element \(id) has an empty frame and cannot be clicked")
     }
@@ -598,7 +682,7 @@ extension RunnerTests {
         // A 404 must remain proof of no dispatch only before this boundary.
         revealAttempted = true
         try? scrollIntoView(id)
-        node = try freshNode(id)
+        node = try actionNode(id)
         guard TapBounds.onScreen(node.center, screen) else {
           throw RunnerError.invalidArgument("element remains off screen after reveal")
         }
@@ -617,7 +701,7 @@ extension RunnerTests {
   /// focus to land. `focused` is false when the element never reported focus (web views often
   /// don't): callers then need a keyboard on screen and a value readback before claiming success.
   private func focus(_ id: String) throws -> (node: UINode, focused: Bool) {
-    var node = try freshNode(id)
+    var node = try actionNode(id, editing: true)
     if node.isFocused { return (node, true) }
     try tapPoint(node.center)
     let deadline = Date().addingTimeInterval(1.0)
@@ -884,7 +968,8 @@ extension RunnerTests {
   }
 
   private func adjust(_ node: UINode, _ id: String, _ body: (XCUIElement) -> Void) throws {
-    let element = try xcuiElement(for: node)
+    let current = try actionNode(id)
+    let element = try xcuiElement(for: current)
     let application = IPURBridge.application(forPID: node.pid)
     let issuesBefore = recordedIssues.count
     var exception: String?
@@ -910,7 +995,8 @@ extension RunnerTests {
 
   private func elementGesture(_ id: String, _ action: String, _ request: HTTPRequest) throws -> HTTPResponse {
     let body = try request.jsonObject()
-    let node = try freshNode(id)
+    if action == "scrollTo" { return try revealElement(id) }
+    let node = try actionNode(id)
     let frame = node.rect
     let center = node.center
     switch action {
@@ -968,8 +1054,6 @@ extension RunnerTests {
       if let exception = IPURBridge.catchException({ _ = coordinate.perform(NSSelectorFromString("forcePress")) }) {
         throw RunnerError.failed("forceTouch failed: \(exception)")
       }
-    case "scrollTo":
-      try scrollIntoView(id)
     case "swipe", "scroll":
       guard let direction = (body["direction"] as? String)?.lowercased() else {
         throw RunnerError.invalidArgument("'direction' is required for \(action)")
@@ -1017,6 +1101,14 @@ extension RunnerTests {
 
   /// Approximates runner's scrollTo: drags the screen toward the element until its frame sits inside
   /// the visible band, re-reading the element after each drag.
+  private func revealElement(_ id: String) throws -> HTTPResponse {
+    // Revealing a disabled/offscreen/unlaid-out row does not activate it, and
+    // cannot require a visible, stable target frame before scrolling begins.
+    _ = try liveElement(id)
+    try scrollIntoView(id)
+    return .value(NSNull())
+  }
+
   private func scrollIntoView(_ id: String) throws {
     let screen = windowSizePoints()
     let band = CGRect(x: 0, y: screen.height * 0.12, width: screen.width, height: screen.height * 0.73)
@@ -1056,7 +1148,7 @@ extension RunnerTests {
     guard order == "next" || order == "previous" else {
       throw RunnerError.invalidArgument("'order' must be 'next' or 'previous'")
     }
-    let node = try freshNode(id)
+    let node = try actionNode(id)
     guard node.type == "XCUIElementTypePickerWheel" else {
       throw RunnerError.invalidArgument("element \(id) is \(node.type), not a picker wheel")
     }
@@ -1086,7 +1178,7 @@ extension RunnerTests {
       let actions = source["actions"] as? [[String: Any]] ?? []
       switch source["type"] as? String {
       case "pointer":
-        paths += try W3CActions.pointerPaths(actions) { try self.freshNode($0).center }
+        paths += try W3CActions.pointerPaths(actions) { try self.actionNode($0).center }
       case "key":
         for action in actions where action["type"] as? String == "keyDown" {
           keys += action["value"] as? String ?? ""

@@ -35,6 +35,7 @@ final class UINode {
   var value: String? { attributes["value"] as? String }
   var placeholder: String? { nonEmpty(attributes["placeholderValue"]) }
   var isEnabled: Bool? { booleanState("isEnabled") }
+  var editableState: Bool? { booleanState("isEditable") }
   var focusedState: Bool? { booleanState("isFocused") }
   /// Convenience for positive focus evidence; false does not establish absence.
   var isFocused: Bool { focusedState == true }
@@ -119,6 +120,52 @@ final class UINode {
   private func nonEmpty(_ value: Any?) -> String? {
     guard let string = value as? String, !string.isEmpty else { return nil }
     return string
+  }
+}
+
+/// Read-only polling of a retained element, never a screen snapshot or an input retry.
+/// A sample budget bounds AX calls; a slow synchronous AX call cannot be interrupted.
+enum ElementFrameStability {
+  static func observe(
+    read: () throws -> UINode, wait: () -> Void,
+    now: () -> Double = { ProcessInfo.processInfo.systemUptime }
+  ) throws -> (node: UINode, stable: Bool?, samples: Int) {
+    let deadline = now() + 0.2
+    var previous = try read()
+    guard valid(previous.rect) else { return (previous, nil, 1) }
+    for sample in 2...4 {
+      guard now() < deadline else { return (previous, sample > 2 ? false : nil, sample - 1) }
+      wait()
+      guard now() < deadline else { return (previous, sample > 2 ? false : nil, sample - 1) }
+      let current = try read()
+      guard valid(current.rect) else { return (current, nil, sample) }
+      let sameTarget = previous.pid == current.pid && previous.type == current.type
+        && previous.identifier == current.identifier
+      if !sameTarget { throw RunnerError.staleElement("element changed while observing its frame") }
+      if close(previous.rect, current.rect) { return (current, true, sample) }
+      previous = current
+    }
+    return (previous, false, 4)
+  }
+
+  static func valid(_ rect: CGRect) -> Bool {
+    [rect.minX, rect.minY, rect.width, rect.height].allSatisfy { $0.isFinite }
+      && rect.width > 0 && rect.height > 0
+  }
+
+  static func close(_ a: CGRect, _ b: CGRect) -> Bool {
+    zip([a.minX, a.minY, a.width, a.height], [b.minX, b.minY, b.width, b.height])
+      .allSatisfy { abs($0 - $1) <= 0.5 }
+  }
+
+  /// Missing AX state remains unknown. Focus/value checks still establish text routing.
+  static func requireState(_ node: UINode, editable: Bool?, editing: Bool) throws {
+    if node.isEnabled == false {
+      throw RunnerError(status: 400, code: "invalid element state", message: "element is disabled; nothing was sent")
+    }
+    if editing && editable == false {
+      throw RunnerError(status: 400, code: "invalid element state", message: "element is not editable; nothing was sent")
+    }
   }
 }
 
