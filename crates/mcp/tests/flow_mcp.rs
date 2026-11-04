@@ -104,6 +104,8 @@ impl McpServer {
             .env("IPHONE_USE_TOKEN", "test-token")
             // These tests read every step of a result from its structure.
             .env("IPHONE_USE_MCP_STRUCTURED", "full")
+            // Scripted daemons answer in order; the on-use status check is tested on its own.
+            .env("IPHONE_USE_MCP_RECONNECT_ON_USE", "0")
             .env("IPHONE_USE_FLOWS_DIR", store)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

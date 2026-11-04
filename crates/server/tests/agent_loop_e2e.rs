@@ -978,6 +978,8 @@ fn a_refused_run_end_keeps_the_run_active_in_the_mcp_client() {
         .env("IPHONE_USE_TOKEN", TOKEN)
         .env("IPHONE_USE_OWNER", "e2e-mcp")
         .env("IPHONE_USE_MCP_PREWARM", "0")
+        // The scripted daemon answers in order; this test is about run headers.
+        .env("IPHONE_USE_MCP_RECONNECT_ON_USE", "0")
         .env("IPHONE_USE_NO_UPDATE_CHECK", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

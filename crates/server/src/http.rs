@@ -789,6 +789,10 @@ async fn agent_owner_inner(
     // While a lease is live the idle watchdog leaves the phone alone; the
     // idle window starts when it is given back, not at the last action.
     state.touch_activity();
+    // The task is over: the watchdog releases the phone now (#task-end).
+    if current.is_some() {
+        note_task_end();
+    }
     let mut released = serde_json::json!({"ok": true, "owner": null});
     if let Some(block) = release_agent_focus(&state).await {
         released["agent_focus"] = block;
@@ -4722,6 +4726,63 @@ fn prepare_idle_runner_probe(state: &AppState) -> bool {
 /// bounce (which must not reset the idle clock). See issue #66.
 const COLD_START_AFTER: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// When a session last gave its lease back (`POST /agent/owner {release}`):
+/// the task ended, so the watchdog releases the phone right away instead of
+/// waiting out the idle window.
+static TASK_ENDED_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+/// Wakes the watchdog when a task ends, so the release does not wait a poll.
+static TASK_END_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// `IPHONE_USE_TASK_END_RELEASE=0` keeps the old behaviour: a task end only
+/// gives the lease back and the phone is released by the idle window.
+fn task_end_release_enabled() -> bool {
+    std::env::var("IPHONE_USE_TASK_END_RELEASE").map_or(true, |v| v.trim() != "0")
+}
+
+fn note_task_end() {
+    *recover(TASK_ENDED_AT.lock()) = Some(Instant::now());
+    TASK_END_WAKE.notify_one();
+}
+
+fn clear_task_end() {
+    *recover(TASK_ENDED_AT.lock()) = None;
+}
+
+/// Whether the last task is over and nobody has driven the phone since: its
+/// session gave the lease back, or its lease lapsed (a session that never
+/// released it). Releasing then is what the person asked for — the phone
+/// leaves automation mode after each task — and it overrides
+/// [`crate::keep_runner`]: on a passcode phone the next task's reconnect waits
+/// for the passcode instead of the runner staying up between tasks.
+fn task_ended(
+    ended_at: Option<Instant>,
+    last_activity: Instant,
+    owner_seen: Option<Instant>,
+    lease: std::time::Duration,
+) -> bool {
+    let released = ended_at.is_some_and(|ended| last_activity <= ended);
+    // Only while nobody drove the phone after the owner's last request: a
+    // person reconnecting from the panel later is not that task.
+    let lapsed = owner_seen.is_some_and(|seen| {
+        seen.elapsed() >= lease && last_activity <= seen + std::time::Duration::from_secs(1)
+    });
+    released || lapsed
+}
+
+impl AppState {
+    fn task_ended(&self) -> bool {
+        // A recording outlives the requests that started it: releasing the
+        // runner under it would cut the video short without saying so.
+        if !task_end_release_enabled() || crate::recording::Recorder::global().is_recording() {
+            return false;
+        }
+        let ended_at = *recover(TASK_ENDED_AT.lock());
+        let last_activity = *recover(self.last_activity.lock());
+        let owner_seen = recover(self.owner.lock()).as_ref().map(|owner| owner.last_seen);
+        task_ended(ended_at, last_activity, owner_seen, std::time::Duration::from_secs(self.owner_lease_secs))
+    }
+}
+
 /// Idle window before the watchdog releases the phone when
 /// `IPHONE_USE_IDLE_RELEASE_SECS` is unset. Five minutes: while a runner is
 /// up iOS shows its "Automation Running" overlay, so an idle phone should not
@@ -4839,11 +4900,18 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
         let mut release_failures: u32 = 0;
         let mut kept_runner: Option<crate::keep_runner::Because> = None;
         loop {
-            tokio::time::sleep(POLL).await;
-            window = effective_idle_window(base_window);
+            tokio::select! {
+                _ = tokio::time::sleep(POLL) => {}
+                _ = TASK_END_WAKE.notified() => {}
+            }
             if state.released.load(Ordering::Relaxed) {
+                clear_task_end();
                 continue; // already let go — reconnect is on-demand (agent_input)
             }
+            // A finished task releases at once and past the keep-runner
+            // exception; anything else waits out the idle window.
+            let task_end = state.task_ended();
+            window = if task_end { std::time::Duration::ZERO } else { effective_idle_window(base_window) };
             if state.runner_lifecycle.is_transitioning() {
                 continue;
             }
@@ -4910,9 +4978,10 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 // A passcode phone is NOT kept here: its runner is down, and
                 // stopping the supervisor stops the relaunches that would each
                 // ask for the passcode (see `crate::keep_runner`).
-                if keep_runner_reason(&state)
-                    .await
-                    .is_some_and(crate::keep_runner::Because::keeps_down_runner)
+                if !task_end
+                    && keep_runner_reason(&state)
+                        .await
+                        .is_some_and(crate::keep_runner::Because::keeps_down_runner)
                 {
                     continue;
                 }
@@ -4949,6 +5018,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                     recover(state.flow_trail.lock()).reset();
                     state.release_owner_lease();
                     note_idle_release();
+                    clear_task_end();
                     release_backoff_until = None;
                     release_failures = 0;
                     tracing::info!("phone released: supervisor stopped while runner was already down");
@@ -4979,10 +5049,13 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                     .map(|since| since.elapsed() >= COLD_START_AFTER)
                     .unwrap_or(true);
                 down_since = None;
-                if cold_start {
-                    state.touch_activity();
+                // A task that just ended is not a cold start to protect.
+                if !task_end {
+                    if cold_start {
+                        state.touch_activity();
+                    }
+                    continue;
                 }
-                continue;
             }
             down_since = None;
             if state.viewer_busy() {
@@ -5010,7 +5083,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
             if release_backoff_until.is_some_and(|until| std::time::Instant::now() < until) {
                 continue; // a recent stop did not take; wait out the backoff
             }
-            if let Some(because) = keep_runner_reason(&state).await {
+            if let Some(because) = if task_end { None } else { keep_runner_reason(&state).await } {
                 if kept_runner != Some(because) {
                     kept_runner = Some(because);
                     match because {
@@ -5038,10 +5111,14 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 state.runner_lifecycle.finish_releasing(release_token);
                 continue;
             }
-            tracing::info!(
-                "idle {}s with no viewer — releasing the phone (stopping runner)",
-                state.idle_for().as_secs()
-            );
+            if task_end {
+                tracing::info!("task ended — releasing the phone (stopping runner)");
+            } else {
+                tracing::info!(
+                    "idle {}s with no viewer — releasing the phone (stopping runner)",
+                    state.idle_for().as_secs()
+                );
+            }
             // While runner is still up: give Do Not Disturb back first.
             release_agent_focus(&state).await;
             let script = setup_sh.clone();
@@ -5063,6 +5140,7 @@ pub fn spawn_idle_release_watchdog(state: Arc<AppState>) {
                 recover(state.flow_trail.lock()).reset();
                 state.release_owner_lease();
                 note_idle_release();
+                clear_task_end();
                 was_up = false;
                 release_backoff_until = None;
                 release_failures = 0;
@@ -22598,6 +22676,24 @@ fn attach_ocr<E: Into<OcrFailure>>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_task_ends_on_release_or_a_lapsed_lease_until_the_phone_is_driven_again() {
+        let lease = std::time::Duration::from_secs(300);
+        let now = Instant::now();
+        let earlier = now - std::time::Duration::from_secs(5);
+        // The session gave its lease back after its last action.
+        assert!(task_ended(Some(now), earlier, None, lease));
+        // Driven again after that: a new task, not an ended one.
+        assert!(!task_ended(Some(earlier), now, None, lease));
+        // Never released: a live lease is a task in progress, a lapsed one is over…
+        let lapsed = now - lease - std::time::Duration::from_secs(1);
+        assert!(!task_ended(None, earlier, Some(earlier), lease));
+        assert!(task_ended(None, lapsed, Some(lapsed), lease));
+        // …unless someone drove the phone after it.
+        assert!(!task_ended(None, now, Some(lapsed), lease));
+        assert!(!task_ended(None, now, None, lease));
+    }
+
     #[test]
     fn setup_retry_reports_a_scheduled_supervisor_retry_only_after_a_failed_round() {
         let dir = tempfile::tempdir().unwrap();

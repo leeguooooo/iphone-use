@@ -138,6 +138,8 @@ impl McpChild {
 
     fn start_options(daemon_url: &str, structured: &str, extra: &[(&str, &str)]) -> Self {
         let mut child = Command::new(binary())
+            // Scripted daemons count requests; the on-use status check is tested on its own.
+            .env("IPHONE_USE_MCP_RECONNECT_ON_USE", "0")
             .envs(extra.iter().copied())
             .env("IPHONE_USE_URL", daemon_url)
             .env("IPHONE_USE_MCP_STRUCTURED", structured)

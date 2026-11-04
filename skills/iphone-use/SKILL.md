@@ -32,11 +32,15 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure fo
    require `drivable:true`; otherwise pause those operations and follow the recovery steps below.
    Paired metadata reads (`phone_home_layout`, `phone_apps`) and cached capability
    discovery do not require a running Runner. Use them without reconnecting or
-   opening Home, and respect any private-hold refusal. Reconnect once
-   (`phone_reconnect`, with `wait_secs` to block until drivable or a blocker /
-   `POST /agent/mode {"mode":"agent"}`) only when the
-   user's current task needs the phone, never for a health check: each runner
-   launch can make the operator type the passcode. If `owner` is another
+   opening Home, and respect any private-hold refusal. A phone `released`
+   after the last task comes back by itself: the next MCP phone tool
+   (`phone_elements`, `phone_tap`, `phone_run_steps`, …) reconnects, waits, and
+   answers `phone_not_ready` with what to do when a person must act (enter the
+   passcode on the phone). Reconnect by hand once (`phone_reconnect`, with
+   `wait_secs` to block until drivable or a blocker / `POST /agent/mode
+   {"mode":"agent"}`) only when the user's current task needs the phone and no
+   tool brought it back, never for a health check: each runner launch can make
+   the operator type the passcode. If `owner` is another
    session, do not drive. → reference: *Phone states and recovery*
 
 2. **Look for a saved flow first.** Entering an app — a `launch_app` response,
@@ -83,7 +87,8 @@ curl -s -H "$AUTH" "$HOST/agent/status"             # probe first; on failure fo
    `phone_flow_publish(confirm=true)`. → reference: *Saving a flow*
 
 When the task is done, release the phone: `phone_release_owner` /
-`POST /agent/owner {"release":true}`. If a response carried `agent_focus`, the
+`POST /agent/owner {"release":true}`. That also stops the device runner right
+away, so the phone leaves automation mode until the next task needs it. If a response carried `agent_focus`, the
 phone is on Do Not Disturb for your session: tell the user, and releasing turns
 it off again.
 
