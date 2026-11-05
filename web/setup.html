@@ -351,6 +351,11 @@
         'iOS 15 and 16 don’t need an update: set up an App Store Connect API key from a paid developer account (IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID), then run the setup command again. iOS 14 and earlier can only be fixed by updating the phone.',
       '配置 App Store Connect API 密钥（iOS 15/16），或升级 iPhone（iOS 14 及更早）；在那之前自动重试也不会成功，换线也没用。':
         'Set up an App Store Connect API key (iOS 15/16) or update the iPhone (iOS 14 and earlier); automatic retries won’t succeed until then, and a different cable won’t help.',
+      'iPhone 存储空间不足': 'The iPhone is out of storage',
+      '手机没有空间安装设备服务。在 设置 › 通用 › iPhone 储存空间 里清出空间（重启一次 iPhone 也能收回部分「系统数据」），再重新运行设置命令。':
+        'There is no room on the phone to install the device runner. Free space under Settings › General › iPhone Storage (restarting the iPhone also gives back some System Data), then run the setup command again.',
+      '在 iPhone 上清出存储空间（重启一次 iPhone 也能收回部分「系统数据」）；服务每隔几分钟会自动再试。':
+        'Free space on the iPhone (restarting it also gives back some System Data); the service tries again every few minutes.',
       '请重启一次 iPhone': 'Restart the iPhone once',
       'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来。重启手机，解锁并保持插线，再重新运行设置命令。':
         'An old developer disk image is stuck on the iPhone, so developer services can’t start. Restart the phone, unlock it and keep it plugged in, then run the setup command again.',
@@ -522,6 +527,11 @@
         title: t('请重启一次 iPhone'),
         setup: t('iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来。重启手机，解锁并保持插线，再重新运行设置命令。'),
         retry: t('重启一次 iPhone，解锁并保持插线；服务每隔几分钟会自动再试。'),
+      },
+      phone_storage_full: {
+        title: t('iPhone 存储空间不足'),
+        setup: t('手机没有空间安装设备服务。在 设置 › 通用 › iPhone 储存空间 里清出空间（重启一次 iPhone 也能收回部分「系统数据」），再重新运行设置命令。'),
+        retry: t('在 iPhone 上清出存储空间（重启一次 iPhone 也能收回部分「系统数据」）；服务每隔几分钟会自动再试。'),
       },
       legacy_needs_usb: {
         title: t('请用数据线连接 iPhone'),

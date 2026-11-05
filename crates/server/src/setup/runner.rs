@@ -546,6 +546,42 @@ pub fn log_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// The phone has no room for the runner app: MobileInstallation's
+/// `Insufficient storage. Requires N bytes; only M bytes available` (#402,
+/// a phone whose System Data filled the disk). The product is fine; only
+/// space on the phone fixes it, so this is checked before the product
+/// failure that would evict it and rebuild every round.
+pub fn log_shows_storage_full(path: &Path) -> bool {
+    storage_full_line(&read_log(path)).is_some()
+}
+
+fn storage_full_line(text: &str) -> Option<&str> {
+    text.lines().find(|line| {
+        let lower = line.to_lowercase();
+        lower.contains("insufficient storage") || lower.contains("not enough storage")
+    })
+}
+
+/// (bytes required, bytes available) from that line, when it names them.
+pub fn storage_full_bytes(path: &Path) -> (Option<u64>, Option<u64>) {
+    let text = read_log(path);
+    let Some(line) = storage_full_line(&text) else { return (None, None) };
+    let lower = line.to_lowercase();
+    let required = lower.find("requires ").and_then(|at| {
+        let digits: String = lower[at + "requires ".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits.parse().ok()
+    });
+    let available = lower.find(" bytes available").and_then(|at| {
+        let head = &lower[..at];
+        let start = head.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        head[start..].parse().ok()
+    });
+    (required, available)
+}
+
 /// A failure of the product itself (install/launch/signing), the only kind
 /// that evicts a recorded product.
 pub fn log_shows_product_failure(path: &Path) -> bool {
@@ -1363,6 +1399,23 @@ mod tests {
         assert!(super::disable_test_recording(&path2.with_extension("missing")).is_err());
         let leftovers: Vec<_> = std::fs::read_dir(path2.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn a_full_phone_is_told_apart_from_a_broken_product() {
+        let full = log("2026-11-05 11:02:03.1+0800 xcodebuild[1:2] Failed to install the app on the device. (MIInstallerErrorDomain error 4: Insufficient storage. Requires 52887552 bytes; only 756000 bytes available.)\n");
+        assert!(log_shows_storage_full(full.path()));
+        // Still a product-level failure by the old test, which is why the
+        // storage check has to come first.
+        assert!(log_shows_product_failure(full.path()));
+        assert_eq!(storage_full_bytes(full.path()), (Some(52_887_552), Some(756_000)));
+        let bare = log("Error: Not enough storage is available on the device\n");
+        assert!(log_shows_storage_full(bare.path()));
+        assert_eq!(storage_full_bytes(bare.path()), (None, None));
+        let broken = log("Failed to install the app on the device. (0xe8008001)\n");
+        assert!(!log_shows_storage_full(broken.path()));
+        // A full Mac disk is not the phone's storage.
+        assert!(!log_shows_storage_full(log("error: No space left on device\n").path()));
     }
 
     #[test]

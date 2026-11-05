@@ -33,6 +33,7 @@ const STICKY_ON_BEGIN: &[&str] = &[
     "automation_not_allowed",
     "wifi_automation_refused",
     "ddi_needs_reboot",
+    "phone_storage_full",
     "legacy_needs_usb",
     "not_connected",
     "runner",

@@ -1372,6 +1372,8 @@ const I18N_EN = {
   'iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统只能升级手机；换线、重试和重连都解决不了': 'iOS 15 and 16 need no update, but they need an App Store Connect API key from a paid developer account (IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID); set it and run iphone-use setup again. iOS 14 and earlier can only be fixed by updating the phone. A new cable, retrying or reconnecting won’t help',
   '请重启一次 iPhone': 'Restart the iPhone once',
   'iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接': 'An old developer disk image is left on the iPhone, so developer services cannot start; restart the phone, unlock it and keep it plugged in, and it connects automatically',
+  'iPhone 存储空间不足': 'The iPhone is out of storage',
+  '手机没有空间安装设备服务；在 设置 › 通用 › iPhone 储存空间 里清出空间（重启一次 iPhone 也能收回部分「系统数据」），之后每隔几分钟会自动再试': 'There is no room on the phone to install the device runner; free space under Settings › General › iPhone Storage (restarting the iPhone also gives back some System Data); it retries on its own every few minutes',
   '请用数据线连接 iPhone': 'Connect the iPhone with a cable',
   '这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上；之后只要手机和这台 Mac 在同一网络就可以拔线（状态里 unplug_ok 为 true 时）': 'This iOS 15/16 iPhone is not plugged in and this Mac cannot reach it over Wi-Fi; plug it in once and keep it unlocked, and it connects in about 20 seconds. After that you can unplug it as long as the phone and this Mac are on the same network (when unplug_ok is true in the status)',
   'Xcode 版本太旧': 'Xcode is too old',
@@ -1991,6 +1993,8 @@ function setupBlockerCopy(blockedOn) {
       return [t('这台 Mac 还驱动不了这台 iPhone 的系统'), t('iOS 15 和 16 不用升级，但需要付费开发者账号的 App Store Connect API 密钥（IPU_RUNNER_ASC_KEY_PATH / IPU_RUNNER_ASC_KEY_ID / IPU_RUNNER_ASC_ISSUER_ID），配好后重新运行 iphone-use setup；iOS 14 及更早的系统只能升级手机；换线、重试和重连都解决不了')];
     case 'ddi_needs_reboot':
       return [t('请重启一次 iPhone'), t('iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来；重启手机、解锁并保持插线后会自动接着连接')];
+    case 'phone_storage_full':
+      return [t('iPhone 存储空间不足'), t('手机没有空间安装设备服务；在 设置 › 通用 › iPhone 储存空间 里清出空间（重启一次 iPhone 也能收回部分「系统数据」），之后每隔几分钟会自动再试')];
     case 'legacy_needs_usb':
       return [t('请用数据线连接 iPhone'), t('这台 iOS 15/16 的 iPhone 没插线，这台 Mac 也连不到它的 Wi-Fi；插一次线并保持解锁，大约 20 秒连上；之后只要手机和这台 Mac 在同一网络就可以拔线（状态里 unplug_ok 为 true 时）')];
     case 'xcode_too_old':
@@ -2011,7 +2015,7 @@ function setupBlockerCopy(blockedOn) {
    managedSetupWillRetry for the same reason, and neither is
    `wifi_automation_refused`: inspect the tunnel or try USB recovery; its backoff is long. */
 const ACTIONABLE_SETUP_BLOCKERS = new Set(
-  ['locked', 'needs_passcode_on_phone', 'locked_after_restart', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'wifi_automation_refused', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old', 'ios_too_old', 'ddi_needs_reboot', 'legacy_needs_usb'],
+  ['locked', 'needs_passcode_on_phone', 'locked_after_restart', 'trust', 'automation_mode_disabled', 'automation_not_allowed', 'wifi_automation_refused', 'not_connected', 'usb', 'ddi', 'warp', 'proxy', 'xcode_too_old', 'ios_too_old', 'ddi_needs_reboot', 'phone_storage_full', 'legacy_needs_usb'],
 );
 /* The managed retry loop alternates between building and its backoff, and it
    publishes the blocker only during the backoff. Reading each poll on its own
