@@ -719,6 +719,7 @@ impl Setup {
                 | "xcode_too_old"
                 | "automation_not_allowed"
                 | "wifi_automation_refused"
+                | "phone_storage_full"
         ) {
             previous.clone()
         } else {
@@ -958,7 +959,7 @@ impl Setup {
                 self.ctx.instance.name
             ));
         }
-        self.phase("prereq", "", "prerequisites passed");
+        self.phase("prereq", &self.build_blocker.clone(), "prerequisites passed");
         Ok(())
     }
 
@@ -4972,6 +4973,16 @@ impl Setup {
                     ));
                 }
                 last_phase = phase;
+            }
+            // A full phone fails every round the same way: say so now, not
+            // after the whole start window (#402).
+            if status::blocked_on(&ctx.status_file) == "phone_storage_full" {
+                let message = status::message(&ctx.status_file);
+                return die(format!(
+                    "{}.\n   Free space on the iPhone (Settings › General › iPhone Storage; restarting the iPhone also gives back System Data), then run iphone-use setup again.\n   Log: {}",
+                    if message.is_empty() { STORAGE_FULL_MESSAGE } else { &message },
+                    ctx.runner_agent_log.display()
+                ));
             }
             let new_id = pid::validate(
                 &ctx,

@@ -3014,7 +3014,8 @@ async fn agent_status(
     // phone has its own relay ports and needs `--instance NAME`.
     let hint = hint_for_this_daemon(hint, crate::instance::current(), &relay_ports_label());
     let hint = match setup_retry.get("next_in_secs").and_then(serde_json::Value::as_u64) {
-        Some(secs) if advice == "blocker" => format!(
+        // A full phone needs a person whatever the next retry does.
+        Some(secs) if advice == "blocker" && setup_blocked_on != "phone_storage_full" => format!(
             "{hint} — the supervisor retries on its own in {secs}s (attempt {}); wait for that retry before asking a person to act",
             setup_retry["attempt"]
         ),
@@ -3833,7 +3834,7 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
             "the iOS 15/16 phone has a stale developer disk image mounted: lockdownd answers every developer service (testmanagerd) with InvalidService even after setup remounted the right image — have a person restart the iPhone once and keep it plugged in and unlocked; the managed service re-checks every few minutes, so do not send another reconnect request",
         ),
         "phone_storage_full" => Some(
-            "the iPhone has no free storage left for the runner app (setup_message says how much it needs and how much is free) — have a person free space on the phone (Settings › General › iPhone Storage; restarting the iPhone also returns some System Data); the managed service re-checks every few minutes, so do not send another reconnect request",
+            "the iPhone has no free storage left for the runner app (setup_message says how much it needs and how much is free) — have a person free space on the phone (Settings › General › iPhone Storage; restarting the iPhone also returns some System Data); the managed service re-checks every few minutes while the phone is not released, so do not send another reconnect request until the person says space is free (after an idle release, reconnect once then)",
         ),
         "legacy_needs_usb" => Some(
             "the phone runs iOS 15/16 and is neither on USB nor reachable over Wi-Fi (its lockdownd does not answer on its LAN address, or that address is not known yet) — have a person plug it into this Mac once, unlocked; after that the runner starts over Wi-Fi and survives the unplug; the managed service starts it as soon as usbmuxd lists the phone on USB, so do not send another reconnect request",
