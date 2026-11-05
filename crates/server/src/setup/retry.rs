@@ -37,6 +37,9 @@ pub enum Kind {
     /// runner is still alive or still exiting there (#265). Nothing about the
     /// build is wrong, so it retries soon instead of backing off to minutes.
     PortInUse,
+    /// The phone has no room to install the runner app (#402). Only freeing
+    /// space on the phone fixes it; the product is not evicted.
+    StorageFull,
 }
 
 impl Kind {
@@ -53,6 +56,7 @@ impl Kind {
             Kind::NeedsReboot => "needs_reboot",
             Kind::LegacyUnreachable => "legacy_unreachable",
             Kind::PortInUse => "port_in_use",
+            Kind::StorageFull => "storage_full",
         }
     }
 
@@ -69,6 +73,7 @@ impl Kind {
             "needs_reboot" => Some(Kind::NeedsReboot),
             "legacy_unreachable" => Some(Kind::LegacyUnreachable),
             "port_in_use" => Some(Kind::PortInUse),
+            "storage_full" => Some(Kind::StorageFull),
             _ => None,
         }
     }
@@ -92,6 +97,9 @@ impl Kind {
             Kind::NotConnected => (3, 10),
             // A person restarts the phone; check again every few minutes.
             Kind::NeedsReboot => (60, 300),
+            // A person frees space on the phone; installing again sooner
+            // only fails the same way.
+            Kind::StorageFull => (60, 300),
             // The supervisor cuts this short when the phone shows up on USB
             // or answers on its LAN address again.
             Kind::LegacyUnreachable => (300, 300),

@@ -3014,7 +3014,8 @@ async fn agent_status(
     // phone has its own relay ports and needs `--instance NAME`.
     let hint = hint_for_this_daemon(hint, crate::instance::current(), &relay_ports_label());
     let hint = match setup_retry.get("next_in_secs").and_then(serde_json::Value::as_u64) {
-        Some(secs) if advice == "blocker" => format!(
+        // A full phone needs a person whatever the next retry does.
+        Some(secs) if advice == "blocker" && setup_blocked_on != "phone_storage_full" => format!(
             "{hint} — the supervisor retries on its own in {secs}s (attempt {}); wait for that retry before asking a person to act",
             setup_retry["attempt"]
         ),
@@ -3648,6 +3649,10 @@ fn human_next_step(
                 "iPhone 上残留了旧的开发者磁盘映像，开发者服务起不来：请把 iPhone 重启一次，解锁后保持插线，会自动接着连接",
                 "An old developer disk image is stuck on the iPhone and its developer services will not start: restart the iPhone once, unlock it and keep it plugged in — connecting continues on its own",
             ),
+            "phone_storage_full" => (
+                "iPhone 存储空间不足，装不上设备服务：在 设置 › 通用 › iPhone 储存空间 里清出空间（重启一次 iPhone 也能收回部分「系统数据」），之后每隔几分钟会自动再试",
+                "The iPhone is out of storage, so the device runner cannot be installed: free space under Settings › General › iPhone Storage (restarting the iPhone also gives back some System Data) — it retries on its own every few minutes",
+            ),
             "legacy_needs_usb" => (
                 "这台 iOS 15/16 的 iPhone 现在既没插线、这台 Mac 也连不到它的 Wi-Fi：插一次线并保持解锁，大约 20 秒连上；之后可以拔线，走 Wi-Fi（手机需和这台 Mac 在同一网络）",
                 "This iOS 15/16 iPhone is neither plugged in nor reachable over Wi-Fi from this Mac: plug it in once and keep it unlocked — it connects in about 20 s, and after that it can be unplugged and used over Wi-Fi (on the same network as this Mac)",
@@ -3828,6 +3833,9 @@ fn setup_blocker_hint(blocked_on: &str) -> Option<&'static str> {
         "ddi_needs_reboot" => Some(
             "the iOS 15/16 phone has a stale developer disk image mounted: lockdownd answers every developer service (testmanagerd) with InvalidService even after setup remounted the right image — have a person restart the iPhone once and keep it plugged in and unlocked; the managed service re-checks every few minutes, so do not send another reconnect request",
         ),
+        "phone_storage_full" => Some(
+            "the iPhone has no free storage left for the runner app (setup_message says how much it needs and how much is free) — have a person free space on the phone (Settings › General › iPhone Storage; restarting the iPhone also returns some System Data); the managed service re-checks every few minutes while the phone is not released, so do not send another reconnect request until the person says space is free (after an idle release, reconnect once then)",
+        ),
         "legacy_needs_usb" => Some(
             "the phone runs iOS 15/16 and is neither on USB nor reachable over Wi-Fi (its lockdownd does not answer on its LAN address, or that address is not known yet) — have a person plug it into this Mac once, unlocked; after that the runner starts over Wi-Fi and survives the unplug; the managed service starts it as soon as usbmuxd lists the phone on USB, so do not send another reconnect request",
         ),
@@ -3862,6 +3870,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<RunnerSetupStatus> {
             | "ios_too_old"
             | "wifi_automation_refused"
             | "ddi_needs_reboot"
+            | "phone_storage_full"
             | "legacy_needs_usb"
     ) {
         1200
@@ -3887,6 +3896,7 @@ fn parse_setup_status(txt: &str, now: u64) -> Option<RunnerSetupStatus> {
             | "automation_not_allowed"
             | "wifi_automation_refused"
             | "ddi_needs_reboot"
+            | "phone_storage_full"
             | "legacy_needs_usb"
             | "not_connected"
             | "locked"
@@ -26417,8 +26427,7 @@ mod tests {
             "xcode_too_old",
             "ios_too_old",
             "ddi_needs_reboot",
-            "legacy_needs_usb",
-            "ddi_needs_reboot",
+            "phone_storage_full",
             "legacy_needs_usb",
             "locked",
             "runner",
@@ -26611,7 +26620,7 @@ mod tests {
         assert_eq!(json["unplug_ok"], true);
         assert_eq!(json["launch_transport"], "wifi");
         assert_eq!(legacy_ios_json(false, dir.path()), "null");
-        for blocker in ["ddi_needs_reboot", "legacy_needs_usb"] {
+        for blocker in ["ddi_needs_reboot", "phone_storage_full", "legacy_needs_usb"] {
             let payload =
                 format!(r#"{{"phase":"prereq","blocked_on":"{blocker}","message":"m","ts":1000}}"#);
             assert_eq!(
