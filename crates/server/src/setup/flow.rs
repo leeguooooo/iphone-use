@@ -4061,6 +4061,37 @@ mod tests {
     }
 
     #[test]
+    fn handoff_stops_only_on_this_attempts_own_storage_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        let write = |generation: &str, phase: &str, blocked: &str| {
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "supervisor_generation": generation,
+                    "phase": phase,
+                    "blocked_on": blocked,
+                    "message": "the iPhone is out of storage (installing it needs 53 MB, 0 MB is free)",
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        // The sticky blocker from an earlier attempt, or this attempt still
+        // building with it kept: not a reason to stop.
+        write("old", "building-fail", "phone_storage_full");
+        assert_eq!(supervisor_storage_full(&path, "new"), None);
+        write("new", "building", "phone_storage_full");
+        assert_eq!(supervisor_storage_full(&path, "new"), None);
+        write("new", "building-fail", "runner");
+        assert_eq!(supervisor_storage_full(&path, "new"), None);
+        write("new", "building-fail", "phone_storage_full");
+        assert!(supervisor_storage_full(&path, "new").unwrap().contains("53 MB"));
+        std::fs::write(&path, b"not JSON").unwrap();
+        assert_eq!(supervisor_storage_full(&path, "new"), None);
+    }
+
+    #[test]
     fn an_unreachable_target_names_the_tunnel_and_never_offers_the_lan_relay_as_the_fix() {
         let auto = not_reachable_message("00008110-001C18203AD2401E", true);
         assert!(auto.contains("no CoreDevice Wi-Fi tunnel"), "{auto}");
@@ -4976,8 +5007,11 @@ impl Setup {
             }
             // A full phone fails every round the same way: say so now, not
             // after the whole start window (#402).
-            if status::blocked_on(&ctx.status_file) == "phone_storage_full" {
-                let message = status::message(&ctx.status_file);
+            if let Some(message) = self
+                .supervisor_generation
+                .as_deref()
+                .and_then(|generation| supervisor_storage_full(&ctx.status_file, generation))
+            {
                 return die(format!(
                     "{}.\n   Free space on the iPhone (Settings › General › iPhone Storage; restarting the iPhone also gives back System Data), then run iphone-use setup again.\n   Log: {}",
                     if message.is_empty() { STORAGE_FULL_MESSAGE } else { &message },
@@ -5161,6 +5195,19 @@ fn ensure_supervisor_started(
 
 /// A fresh ready report with the wrong product cannot become this setup's
 /// success by waiting. Fail immediately rather than using the launch deadline.
+/// This supervisor attempt's own storage failure (its generation, the
+/// failed phase), with its message. The blocker alone is sticky across
+/// attempts, so a full phone from an earlier round must not end this one.
+fn supervisor_storage_full(path: &Path, expected_generation: &str) -> Option<String> {
+    let report = std::fs::read(path)
+        .ok()
+        .and_then(|s| serde_json::from_slice::<serde_json::Value>(&s).ok())?;
+    (report["supervisor_generation"] == expected_generation
+        && report["phase"] == "building-fail"
+        && report["blocked_on"] == "phone_storage_full")
+        .then(|| report["message"].as_str().unwrap_or("").to_string())
+}
+
 fn supervisor_ready(
     path: &Path,
     expected_generation: &str,

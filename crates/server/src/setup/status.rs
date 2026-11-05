@@ -239,16 +239,6 @@ pub fn apply(
     Some(out)
 }
 
-/// The blocker in the status file right now ("" when none).
-pub fn blocked_on(path: &Path) -> String {
-    read_object(path).get("blocked_on").and_then(Value::as_str).unwrap_or("").to_string()
-}
-
-/// The status file's current message ("" when none).
-pub fn message(path: &Path) -> String {
-    read_object(path).get("message").and_then(Value::as_str).unwrap_or("").to_string()
-}
-
 /// The blocker the last attempt left, if it is one a new attempt keeps.
 pub fn previous_blocker(path: &Path) -> String {
     let data = read_object(path);
