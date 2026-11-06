@@ -592,8 +592,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Run until the MCP client closes the pipe.
     let handler = server::PhoneHandler::new(daemon);
+    let on_exit = handler.clone();
     let service = handler.serve(stdio()).await?;
-    service.waiting().await?;
+    let served = service.waiting().await;
+    on_exit.release_own_leases().await;
+    served?;
 
     tracing::info!("iphone-use-mcp exiting");
     Ok(())

@@ -1199,6 +1199,33 @@ impl PhoneHandler {
         Self::with_shared_profile(daemon, std::sync::Arc::new(ToolProfile::from_env()))
     }
 
+    /// When the MCP client goes away, give back the phone leases this process
+    /// still holds, so another session does not wait out the rest of the
+    /// lease (#414). Only a lease the daemon reports as this process's own is
+    /// released, and never under a shared `IPHONE_USE_OWNER` name, which
+    /// another process may be using right now.
+    pub async fn release_own_leases(&self) {
+        if std::env::var("IPHONE_USE_OWNER").is_ok_and(|v| !v.trim().is_empty()) {
+            return;
+        }
+        let mut clients = vec![self.daemon.clone()];
+        if let Ok(instances) = self.instances.lock() {
+            clients.extend(instances.values().map(|h| h.daemon.clone()));
+        }
+        for client in clients {
+            let release = async {
+                let status = client.status().await.ok()?;
+                if status.owner.as_deref() != Some(client.owner()) {
+                    return None;
+                }
+                client.release_owner().await.ok()
+            };
+            if let Ok(Some(_)) = tokio::time::timeout(std::time::Duration::from_secs(5), release).await {
+                tracing::info!("released this session's phone lease on exit ({})", client.owner());
+            }
+        }
+    }
+
     /// One handler per MCP session (`--listen` serves many), sharing the
     /// profile read once at start.
     pub(crate) fn with_shared_profile(
@@ -4937,6 +4964,37 @@ mod tests {
     // ---------------------------------------------------------------------
     // Real tool calls against a scripted daemon.
     // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn exit_releases_only_a_lease_this_process_holds() {
+        // #414: a closed client used to leave its lease for the rest of the 300 s.
+        if std::env::var("IPHONE_USE_OWNER").is_ok() {
+            return;
+        }
+        let me = DaemonClient::new("http://127.0.0.1:1", None).owner().to_string();
+        let ours = format!(r#"{{"ok":true,"owner":"{me}","owner_lease_remaining_secs":180}}"#);
+        let (url, server, requests) = crate::client::tests::mock_daemon_sequence(&[
+            ("200 OK", &ours),
+            ("200 OK", r#"{"ok":true,"owner":null}"#),
+        ]);
+        PhoneHandler::new(DaemonClient::new(url, None)).release_own_leases().await;
+        server.join().unwrap();
+        let status = requests.recv().unwrap();
+        let release = requests.recv().unwrap();
+        assert!(status.starts_with("GET /agent/status"), "{status}");
+        assert!(release.starts_with("POST /agent/owner"), "{release}");
+        assert!(release.to_ascii_lowercase().contains(&format!("x-phone-owner: {}", me.to_ascii_lowercase())), "{release}");
+        assert!(release.contains(r#"{"release":true}"#), "{release}");
+
+        // Another session's lease, or none: read, never release.
+        for other in [r#"{"ok":true,"owner":"mcp-1","owner_lease_remaining_secs":180}"#, r#"{"ok":true,"owner":null}"#] {
+            let (url, server, requests) = crate::client::tests::mock_daemon_sequence(&[("200 OK", other)]);
+            PhoneHandler::new(DaemonClient::new(url, None)).release_own_leases().await;
+            server.join().unwrap();
+            assert!(requests.recv().unwrap().starts_with("GET /agent/status"));
+            assert!(requests.try_recv().is_err(), "must not release a lease it does not hold: {other}");
+        }
+    }
 
     /// One-shot HTTP responder. Returns the URL and a join handle so a panic
     /// inside it surfaces in the test.
