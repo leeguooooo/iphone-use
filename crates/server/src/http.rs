@@ -9543,6 +9543,22 @@ fn occluding_row(rows: &[crate::runner::ElementRow], index: usize) -> Option<&cr
 /// Settings' 通用 row 8 pt above the search field's frame did nothing.
 const OCCLUDER_MARGIN: f64 = 14.0;
 
+/// Height of the strip along the bottom edge of a Face ID iPhone where a
+/// tap does not reach the app (the home indicator's gesture area).
+/// Hardware, 17 Pro Max (956 pt tall), iOS 27 Settings: coordinate taps on a
+/// row at y 892–916 opened it, even over the floating search pill; at y 924
+/// and below nothing happened, so a label tap on 控制中心 [20,902,400,49]
+/// (centre 927) answered ok and stayed on Settings.
+const HOME_INDICATOR_STRIP: f64 = 34.0;
+/// Shorter screens are home-button iPhones, which have no such strip.
+const HOME_INDICATOR_MIN_SCREEN: f64 = 800.0;
+
+/// The bottom strip a tap must avoid, as a `(top, bottom)` band.
+fn home_indicator_strip(rows: &[crate::runner::ElementRow]) -> Option<(f64, f64)> {
+    let [_, sy, _, sh] = screen_rect(rows)?;
+    (sh >= HOME_INDICATOR_MIN_SCREEN).then(|| (sy + sh - HOME_INDICATOR_STRIP, sy + sh))
+}
+
 /// Where to tap `rows[index]` so the touch reaches it: its centre when no
 /// other control (a floating overlay grown by [`OCCLUDER_MARGIN`]) is over it, else the middle of
 /// the tallest horizontal band of the target that no control covers.
@@ -9591,6 +9607,7 @@ fn clear_tap_point(rows: &[crate::runner::ElementRow], index: usize) -> Option<(
         })
         .filter(|grown| grown[0] <= cx && cx <= grown[0] + grown[2])
         .map(|grown| (grown[1], grown[1] + grown[3]))
+        .chain(home_indicator_strip(rows))
         .collect();
     if !covers
         .iter()
@@ -9598,8 +9615,12 @@ fn clear_tap_point(rows: &[crate::runner::ElementRow], index: usize) -> Option<(
     {
         return Some((cx, cy));
     }
-    // Free vertical bands of the target along x = cx.
-    let mut free = vec![(ty, ty + th)];
+    // Free vertical bands of the target along x = cx, on the screen only: a
+    // band past the edge touches nothing.
+    let (top, bottom) = screen_rect(rows).map_or((ty, ty + th), |[_, sy, _, sh]| {
+        (ty.max(sy), (ty + th).min(sy + sh))
+    });
+    let mut free = vec![(top, bottom)];
     for (top, bottom) in covers {
         free = free
             .into_iter()
@@ -25987,6 +26008,38 @@ mod tests {
         assert_eq!(clear_tap_point(&rows, 3), Some((195.0, 685.5)));
         // Partly covered is not a refusal.
         assert_eq!(tap_target_refusal(&rows, 1, &serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn a_tap_never_lands_in_the_home_indicator_strip() {
+        let row = |kind: &str, label: &str, rect: [f64; 4], depth: u32| crate::runner::ElementRow {
+            kind: kind.to_string(),
+            label: label.to_string(),
+            rect,
+            depth,
+            ..Default::default()
+        };
+        // Hardware, 17 Pro Max, iOS 27 Settings scrolled so rows sit at the
+        // bottom edge behind the search pill.
+        let rows = vec![
+            row("Application", "设置", [0.0, 0.0, 440.0, 956.0], 0),
+            row("Button", "控制中心", [20.0, 902.0, 400.0, 49.0], 20),
+            row("Button", "待机显示", [20.0, 931.0, 400.0, 50.0], 20),
+            row("Button", "通用", [20.0, 783.0, 400.0, 50.0], 20),
+        ];
+        // Centre 926.5 is in the strip: the tap moves up into the row's clear part.
+        assert_eq!(clear_tap_point(&rows, 1), Some((220.0, 912.0)));
+        assert!(needs_reveal(&rows, 1));
+        // On screen only inside the strip: nothing clear, brought into view first.
+        assert_eq!(clear_tap_point(&rows, 2), None);
+        assert!(needs_reveal(&rows, 2));
+        // A row well above keeps its centre.
+        assert_eq!(clear_tap_point(&rows, 3), Some((220.0, 808.0)));
+        // A home-button iPhone has no strip.
+        let mut short = rows.clone();
+        short[0].rect = [0.0, 0.0, 375.0, 667.0];
+        short[1].rect = [0.0, 618.0, 375.0, 49.0];
+        assert_eq!(clear_tap_point(&short, 1), Some((187.5, 642.5)));
     }
 
     #[test]
