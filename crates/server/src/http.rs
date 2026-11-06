@@ -2785,6 +2785,9 @@ async fn agent_status(
     let ended_on_phone =
         ended_on_phone(released, human_handoff, &crate::instance::current().state_dir);
     let runner_parked = crate::phone_exit::parked(&crate::instance::current().state_dir);
+    let runner_crashed = runner_parked
+        && crate::phone_exit::reason(&crate::instance::current().state_dir)
+            == Some(crate::phone_exit::Reason::Crashed);
     let runner_parked_reason_json = serde_json::to_string(
         &crate::phone_exit::reason(&crate::instance::current().state_dir).map(|reason| reason.as_str())
     ).unwrap_or_else(|_| "null".into());
@@ -2966,6 +2969,8 @@ async fn agent_status(
             ("handoff", "the phone was handed to a person (mode=human) and the device runner is stopped so they can use it in hand — POST /agent/mode {mode:agent} takes it back")
         } else if ended_on_phone {
             ("ended_on_phone", "the session was ended on the iPhone (both volume keys) and nothing restarts the device runner on its own — ask the person before taking it back; the next action or reconnect starts it again")
+        } else if released && runner_crashed {
+            ("runner_crashed", "iOS ended the device runner's test process (a crash or watchdog kill, often on a very large screen tree), not the person — reconnect when the task needs the phone; if it keeps happening, read a smaller part of the screen")
         } else if released && runner_parked {
             ("session_parked", "the XCTest session ended with uncertain intent; the runner stays parked until a new explicit agent or web request")
         } else if released {
@@ -3686,6 +3691,10 @@ fn human_next_step(
         "ended_on_phone" => (
             "已在手机上退出，这台 Mac 不会自动重连；需要远程操作时点「连接手机」",
             "Ended on the phone; this Mac will not reconnect on its own — choose Connect to control it again",
+        ),
+        "runner_crashed" => (
+            "设备 runner 被 iOS 结束了（不是有人在手机上退出）；需要远程操作时点「连接手机」",
+            "iOS ended the device runner (nobody ended it on the phone); choose Connect to control it again",
         ),
         "session_parked" => (
             "测试会话已结束，控制保持停驻；需要远程操作时点「连接手机」",
@@ -26805,6 +26814,12 @@ mod tests {
         std::fs::write(dir.path().join(crate::phone_exit::PARKED_FILE), "unknown").unwrap();
         assert!(crate::phone_exit::parked(dir.path()));
         assert!(!ended_on_phone(true, false, dir.path()));
+        // #413: a watchdog kill parks too, but nobody ended it on the phone.
+        crate::phone_exit::park(dir.path(), crate::phone_exit::Reason::Crashed).unwrap();
+        assert_eq!(crate::phone_exit::reason(dir.path()), Some(crate::phone_exit::Reason::Crashed));
+        assert!(!ended_on_phone(true, false, dir.path()));
+        crate::phone_exit::park(dir.path(), crate::phone_exit::Reason::Exited).unwrap();
+        assert!(ended_on_phone(true, false, dir.path()));
     }
 
     #[test]

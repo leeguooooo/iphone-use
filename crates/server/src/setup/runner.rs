@@ -530,6 +530,17 @@ pub fn log_shows_automation_revoked(path: &Path, from: u64) -> bool {
     read_log_since(path, from).contains("Not authorized for performing UI testing actions")
 }
 
+/// The test process ended under iOS without the person: xcodebuild's
+/// "Restarting after unexpected exit, crash, or test timeout" (#413: a
+/// watchdog kill on a heavy accessibility tree), logged after `from`.
+/// xcodebuild restarts the test in the same launch, so only the last restart
+/// counts, and only when the runner did not serve again after it.
+pub fn log_shows_runner_crash(path: &Path, from: u64) -> bool {
+    let log = read_log_since(path, from);
+    log.rfind("Restarting after unexpected exit, crash, or test timeout")
+        .is_some_and(|at| !log[at..].contains("ServerURLHere->"))
+}
+
 fn read_log_since(path: &Path, from: u64) -> String {
     use std::io::{Read as _, Seek as _};
     let Ok(mut file) = std::fs::File::open(path) else { return String::new(); };
@@ -1438,6 +1449,26 @@ mod tests {
         assert!(!log_shows_connection_invalidated(file.path(), mark));
         std::fs::write(file.path(), old).unwrap();
         assert!(log_shows_connection_invalidated(file.path(), mark + 100));
+    }
+
+    #[test]
+    fn a_watchdog_restart_in_the_current_window_reads_as_a_crash() {
+        // #413: the runner vanished between two polls; xcodebuild says why.
+        let old = "13:32:21.098  ipu-runner: GET /wda/locked -> 200 (1.2 ms)\n";
+        let crash = "Restarting after unexpected exit, crash, or test timeout; summary will include totals from previous launches.\n";
+        let file = log(&format!("{crash}{old}"));
+        let mark = (crash.len() + old.len()) as u64;
+        assert!(log_shows_runner_crash(file.path(), 0));
+        assert!(!log_shows_runner_crash(file.path(), mark));
+        std::fs::write(file.path(), format!("{crash}{old}{crash}")).unwrap();
+        assert!(log_shows_runner_crash(file.path(), mark));
+        assert!(!log_shows_automation_revoked(file.path(), mark));
+        // A restart the runner came back from is not why it ended later.
+        let served = "ServerURLHere->http://10.0.0.2:8100<-ServerURLHere\n";
+        std::fs::write(file.path(), format!("{crash}{old}{crash}{served}")).unwrap();
+        assert!(!log_shows_runner_crash(file.path(), mark));
+        std::fs::write(file.path(), format!("{crash}{old}{crash}{served}{crash}")).unwrap();
+        assert!(log_shows_runner_crash(file.path(), mark));
     }
 
     #[test]

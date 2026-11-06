@@ -32,6 +32,10 @@ pub enum Reason {
     SessionInvalidated,
     /// The person cancelled the passcode prompt for UI automation.
     PasscodeCanceled,
+    /// iOS ended the runner's test process (a crash or a watchdog kill: the
+    /// log says "Restarting after unexpected exit, crash, or test timeout")
+    /// with no sign of the person (#413). Not an end on the phone.
+    Crashed,
 }
 
 impl Reason {
@@ -40,6 +44,7 @@ impl Reason {
             Self::Exited => "exited",
             Self::SessionInvalidated => "session_invalidated",
             Self::PasscodeCanceled => "passcode_canceled",
+            Self::Crashed => "crashed",
         }
     }
 }
@@ -68,6 +73,7 @@ pub fn reason(state_dir: &Path) -> Option<Reason> {
         "exited" => Some(Reason::Exited),
         "passcode_canceled" => Some(Reason::PasscodeCanceled),
         "session_invalidated" => Some(Reason::SessionInvalidated),
+        "crashed" => Some(Reason::Crashed),
         _ => None,
     }
 }
@@ -110,6 +116,9 @@ mod tests {
         assert_eq!(reason(dir.path()), None);
         park(dir.path(), Reason::Exited).unwrap();
         assert_eq!(reason(dir.path()), Some(Reason::Exited));
+        park(dir.path(), Reason::Crashed).unwrap();
+        assert_eq!(reason(dir.path()), Some(Reason::Crashed));
+        assert!(!handoff(dir.path()));
         park(dir.path(), Reason::PasscodeCanceled).unwrap();
         assert_eq!(reason(dir.path()), Some(Reason::PasscodeCanceled));
     }
