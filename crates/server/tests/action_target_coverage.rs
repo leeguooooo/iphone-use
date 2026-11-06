@@ -288,8 +288,11 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                             ),
                         ));
                     } else if request.contains("/rect") {
+                        // Covered by the grown search pill but with a clear
+                        // band above it (750..764); lower would leave only the
+                        // home-indicator strip, which no tap reaches.
                         let y = if live_covered && (!after || !clear_after) {
-                            780
+                            750
                         } else {
                             420
                         };
@@ -358,7 +361,7 @@ fn locator_modes_check_live_geometry_and_refresh_handles_after_reveal() {
                         let y = point[1].as_f64().unwrap();
                         if live_covered && !clear_after {
                             assert!(
-                                y > 820.0 && y <= 831.0,
+                                (750.0..764.0).contains(&y),
                                 "clear-part fallback must avoid the pill: {payload}"
                             );
                         } else {
