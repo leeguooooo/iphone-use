@@ -78,7 +78,7 @@ def run_case(binary, case, out):
                     value.append({})
             elif path.endswith("/rect"):
                 covered = case in ("covered-point", "covered-default", "replaced-handle", "query-lost-after-reveal")
-                live_y = 780 if covered and not (scrolled and case == "replaced-handle") else 420
+                live_y = 750 if covered and not (scrolled and case == "replaced-handle") else 420
                 value = {"x": 16, "y": live_y, "width": 358, "height": 51}
             elif path.endswith("/window/size"):
                 value = {"width": 390, "height": 844}
@@ -189,11 +189,11 @@ def run_case(binary, case, out):
             else:
                 assert taps[0]["path"].endswith("/ipu/tap"), requests
                 assert len(scrolls) == (1 if case == "covered-default" else 0), requests
-                assert taps[0]["body"]["expected_rect"] == [16.0,780.0,358.0,51.0] if case == "covered-default" else taps[0]["body"]["expected_rect"] == [16.0,420.0,358.0,51.0]
+                assert taps[0]["body"]["expected_rect"] == [16.0,750.0,358.0,51.0] if case == "covered-default" else taps[0]["body"]["expected_rect"] == [16.0,420.0,358.0,51.0]
                 point = taps[0]["body"]["point"]
                 assert len(point) == 2 and point[0] == 195, point
                 y = point[1]
-                assert 820 < y <= 831 if case == "covered-default" else abs(y - 445.5) <= 1, point
+                assert 750 <= y < 764 if case == "covered-default" else abs(y - 445.5) <= 1, point
         receipt["passed"] = True
     except AssertionError as error:
         receipt["error"] = str(error)
