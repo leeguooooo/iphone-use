@@ -35,6 +35,7 @@ pub mod runner_files;
 pub mod status;
 pub mod sys;
 pub mod term;
+pub mod test_attachments;
 pub mod usbdiag;
 
 /// Commands `setup-native` accepts; the shim asks before handing one over

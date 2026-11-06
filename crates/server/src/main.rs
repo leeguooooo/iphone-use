@@ -1329,12 +1329,18 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
             false,
         );
 
-        // Old runner launch logs in Xcode's DerivedData (#402): cleared soon
-        // after start — an upgrade restarts the daemon, so what older versions
-        // left goes without waiting for a runner launch — then every 6 hours.
+        // Old runner launch logs in Xcode's DerivedData (#402) and the XCTest
+        // screen recordings older versions left on the phone (#415): cleared
+        // soon after start — an upgrade restarts the daemon, so what older
+        // versions left goes without waiting for a runner launch — then
+        // every 6 hours. The phone part needs a locally managed real device.
+        let attachments_udid = (state.managed_runner && state.simulator.is_none())
+            .then(|| state.device_udid.clone())
+            .flatten()
+            .filter(|udid| !udid.trim().is_empty());
         if let Err(error) = std::thread::Builder::new()
             .name("launch-log-sweep".into())
-            .spawn(|| {
+            .spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(90));
                 loop {
                     let (removed, freed) = server::setup::runner::sweep_launch_logs_now();
@@ -1343,6 +1349,15 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
                             "removed {removed} old device runner launch logs from Xcode DerivedData ({} MB)",
                             freed / (1024 * 1024)
                         );
+                    }
+                    if let Some(udid) = attachments_udid.as_deref() {
+                        let (emptied, freed) = server::setup::test_attachments::sweep(udid);
+                        if emptied > 0 {
+                            tracing::info!(
+                                "emptied {emptied} old XCTest attachments on the iPhone ({} MB)",
+                                freed / (1024 * 1024)
+                            );
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
                 }
