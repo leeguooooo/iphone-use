@@ -527,6 +527,9 @@ impl Setup {
             crate::phone_exit::Reason::SessionInvalidated => {
                 "the XCTest connection was invalidated; operator intent is unknown, so the runner stays off until an explicit agent or web request"
             }
+            crate::phone_exit::Reason::Crashed => {
+                "iOS ended the device runner's test process (a crash or watchdog kill), not the person; it stays off until the next agent or web request"
+            }
             crate::phone_exit::Reason::PasscodeCanceled => {
                 "the passcode prompt was cancelled on the iPhone; the phone stays with its holder until someone takes it back (web 「交给 agent」 or iphone-use resume)"
             }
@@ -3359,6 +3362,7 @@ impl Setup {
             cause,
             runner::log_shows_automation_revoked(&self.ctx.run_log, log_mark),
             runner::log_shows_connection_invalidated(&self.ctx.run_log, log_mark),
+            runner::log_shows_runner_crash(&self.ctx.run_log, log_mark),
         ) {
             return self.park_on_phone(reason);
         }
@@ -3426,14 +3430,23 @@ impl Setup {
     }
 }
 
-/// An invalidated connection does not prove operator intent. Both outcomes
-/// park; only their reported evidence differs. Explicit revocation wins.
-fn runner_end_reason(cause: &str, revoked: bool, invalidated: bool) -> Option<crate::phone_exit::Reason> {
+/// An invalidated connection or a crash does not prove operator intent. All
+/// outcomes park; only their reported evidence differs. Explicit revocation
+/// wins; a crash (#413) comes before an invalidated connection, which a crash
+/// also leaves behind.
+fn runner_end_reason(
+    cause: &str,
+    revoked: bool,
+    invalidated: bool,
+    crashed: bool,
+) -> Option<crate::phone_exit::Reason> {
     use crate::phone_exit::Reason;
     match cause {
         "revoked" => Some(Reason::Exited),
-        "runner" if revoked || !invalidated => Some(Reason::Exited),
-        "runner" => Some(Reason::SessionInvalidated),
+        "runner" if revoked => Some(Reason::Exited),
+        "runner" if crashed => Some(Reason::Crashed),
+        "runner" if invalidated => Some(Reason::SessionInvalidated),
+        "runner" => Some(Reason::Exited),
         _ => None,
     }
 }
@@ -3970,11 +3983,16 @@ mod tests {
     #[test]
     fn session_end_evidence_never_enables_automatic_rebuild() {
         use crate::phone_exit::Reason;
-        assert_eq!(runner_end_reason("revoked", false, true), Some(Reason::Exited));
-        assert_eq!(runner_end_reason("runner", true, true), Some(Reason::Exited));
-        assert_eq!(runner_end_reason("runner", false, false), Some(Reason::Exited));
-        assert_eq!(runner_end_reason("runner", false, true), Some(Reason::SessionInvalidated));
-        assert_eq!(runner_end_reason("unreachable", false, true), None);
+        assert_eq!(runner_end_reason("revoked", false, true, false), Some(Reason::Exited));
+        assert_eq!(runner_end_reason("runner", true, true, false), Some(Reason::Exited));
+        assert_eq!(runner_end_reason("runner", false, false, false), Some(Reason::Exited));
+        assert_eq!(runner_end_reason("runner", false, true, false), Some(Reason::SessionInvalidated));
+        assert_eq!(runner_end_reason("unreachable", false, true, false), None);
+        // #413: a watchdog kill is iOS's doing, not the person's; revocation still wins.
+        assert_eq!(runner_end_reason("runner", false, false, true), Some(Reason::Crashed));
+        assert_eq!(runner_end_reason("runner", false, true, true), Some(Reason::Crashed));
+        assert_eq!(runner_end_reason("runner", true, false, true), Some(Reason::Exited));
+        assert_eq!(runner_end_reason("unreachable", false, false, true), None);
     }
 
     #[test]

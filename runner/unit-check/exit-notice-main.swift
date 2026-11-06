@@ -16,6 +16,10 @@ check(center.authorize == nil, "default startup must not request permission")
 center.settings!(Settings(authorizationStatus: .authorized))
 wait { center.requests().count == 1 }
 let request = center.requests()[0].0
+check(request.content.interruptionLevel == .passive, "the notice must not interrupt the controlled app (#413)")
+var presented: UNNotificationPresentationOptions?
+notice.userNotificationCenter(center, willPresent: UNNotification(request: request)) { presented = $0 }
+check(presented == [.list], "the notice must never show as a banner (#413)")
 func respond(_ target: RunnerExitNotice, _ request: UNNotificationRequest, _ action: String) {
   var completed = false
   target.userNotificationCenter(center, didReceive: UNNotificationResponse(actionIdentifier: action,

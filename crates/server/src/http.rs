@@ -26805,6 +26805,12 @@ mod tests {
         std::fs::write(dir.path().join(crate::phone_exit::PARKED_FILE), "unknown").unwrap();
         assert!(crate::phone_exit::parked(dir.path()));
         assert!(!ended_on_phone(true, false, dir.path()));
+        // #413: a watchdog kill parks too, but nobody ended it on the phone.
+        crate::phone_exit::park(dir.path(), crate::phone_exit::Reason::Crashed).unwrap();
+        assert_eq!(crate::phone_exit::reason(dir.path()), Some(crate::phone_exit::Reason::Crashed));
+        assert!(!ended_on_phone(true, false, dir.path()));
+        crate::phone_exit::park(dir.path(), crate::phone_exit::Reason::Exited).unwrap();
+        assert!(ended_on_phone(true, false, dir.path()));
     }
 
     #[test]

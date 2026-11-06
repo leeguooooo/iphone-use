@@ -19,8 +19,10 @@ struct UNNotificationCategory {
   let intentIdentifiers: [String]
   let options: Set<String>
 }
+enum UNNotificationInterruptionLevel { case passive, active, timeSensitive, critical }
 class UNMutableNotificationContent {
   var title = "", body = "", categoryIdentifier = "", threadIdentifier = ""
+  var interruptionLevel = UNNotificationInterruptionLevel.active
 }
 struct UNNotificationRequest {
   let identifier: String

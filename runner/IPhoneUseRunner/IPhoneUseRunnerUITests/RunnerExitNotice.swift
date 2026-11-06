@@ -2,7 +2,8 @@
 //
 // iOS gives no app a button over other apps, and its own way out of UI automation (holding both
 // volume keys) also changes the volume. A notification stays on the Lock Screen and in
-// Notification Center, so the person holding the phone can end the session from there: the
+// Notification Center (delivered passively, without a banner over the app being driven), so the
+// person holding the phone can end the session from there: the
 // button ends the serve loop like POST /shutdown, the runner exits, and the Mac supervisor
 // parks instead of starting it again.
 //
@@ -53,6 +54,9 @@ final class RunnerExitNotice: NSObject, UNUserNotificationCenterDelegate {
           : "Touch and hold this notification, then tap End control to take the phone back. The Mac will not reconnect on its own."
         content.categoryIdentifier = Self.categoryID
         content.threadIdentifier = Self.categoryID
+        // Into Notification Center and the Lock Screen only: a banner would sit over the app being
+        // driven, where one stray touch ends the session (#413).
+        if #available(iOS 15.0, *) { content.interruptionLevel = .passive }
         let request = UNNotificationRequest(identifier: requestID, content: content, trigger: nil)
         center.add(request) { [self] error in
           queue.async { [self] in
@@ -89,7 +93,8 @@ final class RunnerExitNotice: NSObject, UNUserNotificationCenterDelegate {
     _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    completionHandler([.banner, .list])
+    // List only, never a banner over the controlled app (#413).
+    completionHandler([.list])
   }
 
   /// Only the explicit End action ends this session. Body taps and stale notices do not.
