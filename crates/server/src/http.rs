@@ -7910,6 +7910,9 @@ async fn tap_snapshot_element(
                 .await
                 .map_err(SnapshotElementTapError::AfterDispatch);
         }
+        // Nothing clear to touch and nothing to scroll: a tap would land on
+        // the cover (or the home indicator strip) and still answer ok.
+        return Err(SnapshotElementTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT));
     }
     if let Some(locator) = snapshot_row_locator(row) {
         // System-owned sheets and document pickers can publish stale or offset
@@ -9208,6 +9211,11 @@ async fn tap_unique_label(
                 RevealError::Dispatch(error) => UniqueLabelTapError::AfterDispatch(error),
             });
         }
+        // No live element to scroll and no clear part: refuse rather than
+        // tap a spot that does not reach the target.
+        if !off_screen && clear_tap_point(&rows, index).is_none() {
+            return Err(UniqueLabelTapError::Refused("element_occluded", ELEMENT_OCCLUDED_HINT));
+        }
     }
     // Never a tap outside the screen: it touches nothing and would read as ok.
     if !point_on_screen(&rows, x, y) {
@@ -9556,7 +9564,7 @@ const HOME_INDICATOR_MIN_SCREEN: f64 = 800.0;
 /// The bottom strip a tap must avoid, as a `(top, bottom)` band.
 fn home_indicator_strip(rows: &[crate::runner::ElementRow]) -> Option<(f64, f64)> {
     let [_, sy, _, sh] = screen_rect(rows)?;
-    (sh >= HOME_INDICATOR_MIN_SCREEN).then(|| (sy + sh - HOME_INDICATOR_STRIP, sy + sh))
+    (sh >= HOME_INDICATOR_MIN_SCREEN).then_some((sy + sh - HOME_INDICATOR_STRIP, sy + sh))
 }
 
 /// Where to tap `rows[index]` so the touch reaches it: its centre when no
