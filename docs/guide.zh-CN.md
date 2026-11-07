@@ -153,6 +153,36 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 `apps/ios` 是原生 SwiftUI App（最低部署版本 iOS 15）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码，所以手机锁着时 App 几秒内就会提示「请解锁」，解锁后马上连上。遇到 App 禁止截屏的界面（支付、银行类 App），画面不再是一片白，而是显示守护进程按控件树画的线框图。安装：App 不上 App Store，用你自己的签名团队（就是 `iphone-use setup` 给 runner 用的那个）编译安装：运行 `iphone-use setup-app`。它会下载本版本的 App 源码（`iphone-use-app.tar.gz`，校验 SHA-256），用你的团队编译，再用 `devicectl` 装到手机上。付费开发者团队装的是带**本机控制**的完整版：App 里的网络扩展在手机上自己启动 runner，运行时不需要 Mac（iOS 17.4 及以上）；首次配对要插一次 USB 线，`setup-app` 会生成配对记录交给 App，之后在手机上打开 Phone Use › 设置 › 本机控制 › 启用本机控制，并允许添加 VPN 配置。本机控制运行时占用手机的自动化会话，Mac 端 runner 启动不了（会一直等待）。要回到由 Mac 控制，先在 App 里停止本机控制（本机控制 › 停止本机控制），再运行 `iphone-use setup resume`；`iphone-use setup pause` 则是停掉 Mac 端 runner，让本机控制能启动。免费 Apple ID 签不了网络扩展，装的是远程版，只能控制 Mac 托管的手机（用上面的扫码连接）；付费团队也可以用 `--remote-only` 只装远程版。
 
+## 在任意网络远程控制（Tailscale / Cloudflare Tunnel）
+
+daemon 只在这台 Mac 上监听。要在别的网络（蜂窝、公司、酒店）控制手机，让 daemon 替你开一条隧道。两种方式重装、升级后都还在，也都照样要 daemon 密码。
+
+**Tailscale**（推荐：只有自己的设备能连，端到端加密，实时画面完整）：
+
+```bash
+iphone-use remote tailscale on        # 第一次会打印登录链接，打开登录即可
+```
+
+iphone-use 会像 Rex 那样，以独立设备的身份加入你的 tailnet，设备名是 `iphone-use`（第二台手机是 `iphone-use-<实例名>`）。它靠随包附带的小程序 `iphone-use-tailnet`（基于 Tailscale 的 `tsnet`）跑在 daemon 旁边，这台 Mac 上不用装或登录 Tailscale App。在任何登录了你 Tailscale 的设备上，用浏览器或 Phone Use Remote App 打开 `https://iphone-use.<tailnet>.ts.net`，或 `http://<tailnet IP>:44321`。默认只放行拥有这个节点的 Tailscale 账号的设备；加 `--allow-tailnet-members` 放行 tailnet 里的其他人（他们仍要输密码）。其他选项：`--hostname NAME`；`--auth-key-file FILE` 用一次性 auth key 入网，不走登录链接，key 不能写在命令行上；`--control-url URL` 用于 Headscale。`off` 停止服务但保留登录，`login` 重新给一个登录链接，`logout` 退出登录，`rename NAME` 改设备名。
+
+HTTPS 地址要在 Tailscale 管理后台 › DNS 里打开 **HTTPS Certificates**。没打开时只能用明文地址，浏览器在明文页面上用不了 WebCodecs，画面会退回 MJPEG。
+
+**Cloudflare Tunnel**（对方设备不用装 Tailscale；需要先 `brew install cloudflared`）：
+
+```bash
+iphone-use remote cloudflare on                     # quick tunnel，不用账号
+iphone-use remote cloudflare on --token-file token.txt --url https://phone.example.com
+```
+
+不带 token 时开的是 quick tunnel：随机的 `https://….trycloudflare.com` 地址，daemon 每次重启都会变。Cloudflare 在 quick tunnel 上会把流式响应攒到结束才发，所以那里的实时画面是一张张截图（每秒约两张），点击、输入和 agent 照常可用。要实时视频就用 named tunnel：在 Cloudflare Zero Trust › Networks › Tunnels 新建一条，把一个公网域名指向 `http://localhost:44321`，把 token 存进文件，两个参数一起传。named tunnel 的域名前面加 Cloudflare Access 只适合浏览器使用：App 和 agent 过不了 Access 登录。
+
+之后：
+
+- `iphone-use remote status` 显示开了哪些、地址是什么（脚本用 `--json`）；`/agent/status` 的 `remote` 字段内容相同。
+- `iphone-use remote pair` 打印这个地址的一次性二维码和链接，用你要拿来远程控制的手机或电脑扫。网页上的「扫码」也会把远程地址排在最前面。
+- 别的电脑上的 agent 和 MCP 客户端：`IPHONE_USE_URL=<地址> IPHONE_USE_TOKEN=<daemon 密码或 agent token>`。
+- daemon 没设密码时拒绝开启远程访问。两个小程序的日志在 `~/.iphone-use/remote/`（`tailnet.log`、`cloudflared.log`）；Tailscale 小程序不向 Tailscale 上传日志。
+
 ## Agent API
 
 完整参考：**[`docs/agent-api.html`](agent-api.html)**。随包的 skill（[`skills/iphone-use/SKILL.md`](../skills/iphone-use/SKILL.md)）教 agent 这套循环。
@@ -458,7 +488,7 @@ daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当�
 - 密码 / cookie / bearer 保护 `44321`。手机上 runner 的 `8100` 和 `9100` 监听所有网卡，但不带本次启动令牌签名的请求一律 401、不做任何事：签名是 HMAC-SHA256，覆盖方法、路径、请求体、时间戳和一次性 nonce。令牌只存在 Mac 上（状态目录里的 `runner-token`，权限 0600）和 runner 的测试环境里，从不在网络上传输，所以截获的请求既不能重放也不能篡改。没拿到令牌就启动的 runner 拒绝一切请求。
 - 签名不等于加密。USB 和 CoreDevice 隧道只通到这台 Mac；iOS 15/16 的局域网转发和 `IPU_RUNNER_ALLOW_LAN=1` 都是明文 HTTP，截图、元素树、视频对能看到这段 Wi-Fi 流量的人可见。能读你这个用户文件的人也能读到令牌。
 - **Wi-Fi**：usbmuxd 对 Wi-Fi 手机的网络连接只能到 lockdownd，到不了 runner 的端口，所以 `iphone-use relay` 改走 CoreDevice 的隧道（`devicectl list devices` 里 `tunnelState` 为 `connected` 时的 `tunnelIPAddress`）。这条隧道是加密的、只有这台 Mac 能走，比局域网 `socat`（`IPU_RUNNER_ALLOW_LAN=1`）安全，所以默认就开：已配对、没插线但隧道在线的手机，setup 和重新拉起都直接走隧道（`IPU_RUNNER_TRANSPORT=auto`；没设 `IPU_RUNNER_UDID` 又没插线时，只在恰好一台手机有隧道时选它，多台就拒绝猜）。插着线时仍然走 USB；隧道上一次点击约 330–380 ms，USB 约 280 ms。状态里 `transport` 显示 `wifi-tunnel`。`IPU_RUNNER_TRANSPORT=usb` 恢复「setup 必须插线」的旧规则。`IPU_RUNNER_ALLOW_LAN=1` 是另一个独立的、不安全的开关，只管明文局域网中继（`transport` 为 `wifi`）；plist 里写着 `IPU_RUNNER_ALLOW_LAN=0` 的老安装升级后会走隧道，但不会因此打开局域网中继。不少手机在 Wi-Fi 下也能重新启动 runner（iOS 27.0 的 iPhone 17 Pro Max 几秒就起来）；但有的 iOS 不允许通过 Wi-Fi 启动 UI 自动化（`wifi_automation_refused`，在 iOS 27.2 beta 的 iPhone 14 上遇到：没有密码提示，「启用 UI 自动化」已打开，Xcode 27.0 和 27.2 beta 都一样，手机上没有能点的选项）。这种手机插一次线启动，之后拔掉可以一直用 Wi-Fi，直到设备服务重启（比如手机重启）时再插一次。为此 setup 会在实例目录留下 `wifi-start-refused` 标记（下次在 Wi-Fi 下启动成功就删掉），标记存在且手机走 Wi-Fi 隧道时，空闲释放不再停 runner，状态里 `wifi_start_refused` 为 true；代价是空闲时手机一直处于自动化状态。走 USB 时照常空闲释放。
-- 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
+- 从局域网外访问时用 `iphone-use remote`（见[在任意网络远程控制](#在任意网络远程控制tailscale--cloudflare-tunnel)），或者你自己的带鉴权 HTTPS 反向代理、VPN，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`（经 HTTPS 时带 `Secure`）。quick tunnel 的地址是公开的，知道地址的人都能打开登录页，所以密码要够强，不用时关掉（`iphone-use remote cloudflare off`）。
 - owner 租约（`X-Phone-Owner`）是协作会话之间的协调机制，不是安全边界。
 - 开放访问期间不要停在支付、私聊或 2FA 画面。不用时停掉 LaunchAgent。
 

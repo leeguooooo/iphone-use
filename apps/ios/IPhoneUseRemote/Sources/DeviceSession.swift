@@ -213,6 +213,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     }
 
     @Published private var redactedTask: Task<Void, Never>?
+    /// Stills in place of the stream on a route that buffers it (see
+    /// `DaemonClient.streamsBuffered`).
+    private var stillsTask: Task<Void, Never>?
     @Published private(set) var client: DaemonClient?
     @Published private var reader: H264StreamReader?
     /// The mode the running reader asked for.
@@ -494,6 +497,8 @@ final class DeviceSession: ObservableObject, Identifiable {
         reader = nil
         mjpegReader?.stop()
         mjpegReader = nil
+        stillsTask?.cancel()
+        stillsTask = nil
         mjpegImage = nil
         h264Unavailable = false
         client = nil
@@ -575,7 +580,7 @@ final class DeviceSession: ObservableObject, Identifiable {
     /// reopen a stream that went silent (the runner sends a frame at least
     /// every second, so silence means the connection died without saying so).
     private func updateMetrics() {
-        let wanted = role == .full && video != nil && (reader != nil || mjpegReader != nil)
+        let wanted = role == .full && video != nil && (reader != nil || mjpegReader != nil || stillsTask != nil)
         if wanted, metricsTask == nil {
             metricsTask = Task { [weak self] in
                 var restarts = 0
@@ -622,6 +627,33 @@ final class DeviceSession: ObservableObject, Identifiable {
                 && $0.deviceState != "offline" && $0.deviceState != "blocked"
         } ?? false
         let wanted = client != nil && video != nil && !suspended && showable && !Self.observeOnly
+        if wanted, let client, client.streamsBuffered {
+            reader?.stop()
+            reader = nil
+            mjpegReader?.stop()
+            mjpegReader = nil
+            if stillsTask == nil {
+                if videoWaitSince == nil { videoWaitSince = Date() }
+                stillsTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        guard let self, let client = self.client, client.streamsBuffered else { return }
+                        if let (data, _) = try? await client.screenshot(maxSide: 800),
+                           let image = UIImage(data: data), !Task.isCancelled {
+                            self.mjpegImage = image
+                            self.frameArrived()
+                        }
+                        try? await Task.sleep(for: .milliseconds(300))
+                    }
+                }
+            }
+            updateMetrics()
+            return
+        } else if let task = stillsTask {
+            task.cancel()
+            stillsTask = nil
+            mjpegImage = nil
+            if !wanted { videoLive = false; videoWaitSince = nil }
+        }
         if wanted, h264Unavailable, mjpegReader == nil, let client {
             let reader = MJPEGStreamReader(
                 request: client.request("agent/mjpeg"),

@@ -63,6 +63,15 @@ else
     echo "         (cargo build --release --bin iphone-use-legacy-launch)" >&2
 fi
 
+TAILNET_BINARY="$REPO_ROOT/target/release/iphone-use-tailnet"
+if [ -f "$TAILNET_BINARY" ]; then
+    cp "$TAILNET_BINARY" "$APP/Contents/MacOS/iphone-use-tailnet"
+    chmod 755 "$APP/Contents/MacOS/iphone-use-tailnet"
+else
+    echo "WARNING: $TAILNET_BINARY not built; \`iphone-use remote tailscale on\` will not work from this app" >&2
+    echo "         (OUT=target/release/iphone-use-tailnet bash tailnet/build.sh)" >&2
+fi
+
 # Write Info.plist, substituting version placeholders from template.
 # Uses context-sensitive sed (n command: advance to next line after the key) so
 # the version value is updated regardless of what it was before — bumping the

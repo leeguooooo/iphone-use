@@ -48,6 +48,25 @@ jobs:
       - run: python3 -I scripts/test-moving-target-verdict.py
       - run: python3 -I scripts/test-simulator-ui-readiness.py
 
+  tailnet-helper:
+    name: Tailscale helper (iphone-use-tailnet)
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tailnet/go.mod
+          cache-dependency-path: tailnet/go.sum
+      - name: vet, unit and private-tailnet end-to-end tests, universal build
+        working-directory: tailnet
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./... && go vet -tags integration ./...
+          go test ./...
+          go test -tags integration -count=1 ./...
+          OUT="$RUNNER_TEMP/iphone-use-tailnet" bash build.sh
+
   remote-connection:
     name: Remote connection and credential recovery
     # The iOS app requires Swift 6 on a supported macOS runner image.

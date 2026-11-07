@@ -282,6 +282,25 @@ fn interface_ipv4s() -> Vec<(String, Ipv4Addr)> {
     out
 }
 
+/// `scheme://host[:port]` of `url`, without its path.
+pub fn origin(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            format!("{scheme}://{authority}")
+        }
+        None => url.to_string(),
+    }
+}
+
+/// The host of `url` as it appears in a `Host` header, without the port.
+pub fn origin_host(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let (host, _) = split_host(authority);
+    (!host.is_empty()).then_some(host)
+}
+
 /// True for `localhost`, `127.x`, `::1` — hosts a phone cannot use.
 pub fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
