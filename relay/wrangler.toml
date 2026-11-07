@@ -5,6 +5,13 @@ main = "src/index.ts"
 compatibility_date = "2026-10-01"
 # Our deployment; change or delete this line when you deploy your own (see README.md).
 routes = [{ pattern = "iphone-use-relay.leeguoo.com", custom_domain = true }]
+# One origin per phone (`https://<id>.iphone-use-relay.leeguoo.com/…`) needs a
+# wildcard DNS record, a certificate that covers it, and this second route
+# (see README.md, "One origin per phone"). Not deployed yet.
+# routes = [
+#   { pattern = "iphone-use-relay.leeguoo.com", custom_domain = true },
+#   { pattern = "*.iphone-use-relay.leeguoo.com/*", zone_name = "leeguoo.com" },
+# ]
 
 [[durable_objects.bindings]]
 name = "PHONES"

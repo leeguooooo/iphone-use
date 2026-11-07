@@ -41,7 +41,36 @@ iphone-use setup-app --instance <controlled phone> --connect-to <controlling pho
 ```
 
 For a daemon on a Mac, set `IPHONE_USE_RELAY_URL=https://<your relay>` in its
-environment. It then logs `relay tunnel open: https://<your relay>/p/<id>`.
+environment. It then logs `relay tunnel open: https://<your relay>/p/0123…`;
+the id is cut short there because whoever has it can reach the phone's sign-in
+page. The full address is in `relay-identity.json` in the daemon's state
+directory (`"id"`), or in the log at `RUST_LOG=server::relay_client=debug`.
+
+## One origin per phone (optional)
+
+The path form `https://<relay>/p/<id>/…` puts every phone on one origin, so
+browsers share cookies and storage between phones. The relay also answers the
+host form `https://<id>.<relay>/…`, which gives each phone its own origin. The
+daemon learns which form was used from `x-forwarded-prefix` (`/p/<id>` or `/`)
+and scopes its cookie `Path` to it.
+
+To turn the host form on for your deployment:
+
+1. Add a wildcard DNS record for the relay's host, proxied through Cloudflare:
+   `*.iphone-use-relay.example.com` (CNAME to the relay's host, or AAAA `100::`).
+2. Add a zone route for it in `wrangler.toml` next to the existing one:
+   `{ pattern = "*.iphone-use-relay.example.com/*", zone_name = "example.com" }`
+   (a wildcard is a route, not a `custom_domain`).
+3. Certificates: Cloudflare's Universal SSL only covers one wildcard level at
+   the zone apex (`*.example.com`). A relay at `relay.example.com` needs a
+   certificate for `*.relay.example.com`: Advanced Certificate Manager or
+   Total TLS. A relay at the zone apex, or on `<name>.workers.dev`, does not
+   get a second-level wildcard either, so give it its own hostname.
+4. `npx wrangler deploy`, then `curl https://<id>.<relay>/agent/status`.
+
+Only an id of 32 lowercase hex characters fits in a hostname. Daemons make
+such ids since this form exists; a phone with an older base64url id keeps
+working on the path form and keeps its id.
 
 ## Cost
 
@@ -59,9 +88,17 @@ Check the current prices on Cloudflare's pricing page.
 
 ## Limits
 
-- Request bodies are capped at 1 MB, and each phone can have 32 requests in
-  flight.
-- A phone has 30 s to start answering a request.
+- Request bodies are capped at 1 MB (checked against `Content-Length` before
+  the body is read). Each phone can have 32 requests waiting for its first
+  byte and 96 in flight in all, long-lived answers (a live picture) included.
+- A phone has 30 s to start answering a request. When that passes, or the
+  client goes away, the relay tells the phone to stop (`cancel`) and drops
+  anything the phone still sends for that request.
+- Request ids are random; one never names a request that is in flight or was
+  cancelled a moment ago, even after the phone's object was evicted and
+  restarted.
+- The relay sets `x-forwarded-proto`, `x-forwarded-host`, `x-forwarded-prefix`
+  and `x-forwarded-for` itself and drops any the client sent.
 - TLS ends at Cloudflare, so the relay can see the traffic it passes along.
   Run your own relay if that matters to you.
 - The daemon's web pages assume they are served from `/`, so use the native

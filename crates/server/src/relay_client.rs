@@ -84,30 +84,60 @@ pub fn spawn(relay_url: impl Fn() -> Option<String> + Send + 'static, state_dir:
     });
 }
 
+const IDENTITY_FILE: &str = "relay-identity.json";
+
 fn identity_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("relay-identity.json")
+    state_dir.join(IDENTITY_FILE)
 }
 
+fn read_identity(state_dir: &Path) -> Option<Identity> {
+    let text = std::fs::read_to_string(identity_path(state_dir)).ok()?;
+    serde_json::from_str::<Identity>(&text).ok()
+}
+
+/// The identity on disk, or a new one. An id is 32 lowercase hex characters
+/// (128 bits) so it also fits in a hostname (`<id>.<relay>`); ids made by
+/// older releases (base64url, mixed case) keep working on the `/p/<id>` path
+/// and are never replaced: the relay pins the key to the id.
 fn load_identity(state_dir: &Path) -> Result<Identity, String> {
-    let path = identity_path(state_dir);
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        if let Ok(identity) = serde_json::from_str::<Identity>(&text) {
-            return Ok(identity);
-        }
+    if let Some(identity) = read_identity(state_dir) {
+        return Ok(identity);
     }
     let mut id = [0u8; 16];
     let mut key = [0u8; 32];
     getrandom::fill(&mut id).map_err(|e| e.to_string())?;
     getrandom::fill(&mut key).map_err(|e| e.to_string())?;
-    let identity = Identity { id: URL_SAFE_NO_PAD.encode(id), key: URL_SAFE_NO_PAD.encode(key) };
-    std::fs::write(&path, serde_json::to_string(&identity).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let identity = Identity { id: hex(&id), key: URL_SAFE_NO_PAD.encode(key) };
+    let text = serde_json::to_string(&identity).map_err(|e| e.to_string())?;
+    let path = identity_path(state_dir);
+    // 0600 from the first byte, no symlink, no clobbering: the file only comes
+    // into being here.
+    match crate::runtime_dir::write_secret_in(state_dir, IDENTITY_FILE, text.as_bytes()) {
+        Ok(()) => Ok(identity),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Something is there that did not read as an identity. Another
+            // daemon may have written a good one just now: take that. Else it
+            // is junk (or a symlink); replace it.
+            if let Some(identity) = read_identity(state_dir) {
+                return Ok(identity);
+            }
+            std::fs::remove_file(&path).map_err(|e| format!("replace {}: {e}", path.display()))?;
+            crate::runtime_dir::write_secret_in(state_dir, IDENTITY_FILE, text.as_bytes())
+                .map_err(|e| format!("write {}: {e}", path.display()))?;
+            Ok(identity)
+        }
+        Err(e) => Err(format!("write {}: {e}", path.display())),
     }
-    Ok(identity)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `/p/<id>` with the id cut short: the id is the address of this phone, and
+/// the log is not the place to hand it out.
+fn redacted_public_path(id: &str) -> String {
+    format!("/p/{}…", id.chars().take(4).collect::<String>())
 }
 
 /// One tunnel session, until the relay or the network drops it.
@@ -156,7 +186,8 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
             .await
             .map_err(|e| format!("handshake: {e}"))?
     };
-    tracing::info!("relay tunnel open: {}/p/{}", relay.trim_end_matches('/'), identity.id);
+    tracing::info!("relay tunnel open: {}{}", relay.trim_end_matches('/'), redacted_public_path(&identity.id));
+    tracing::debug!("relay public url: {}/p/{}", relay.trim_end_matches('/'), identity.id);
 
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(64);
@@ -201,13 +232,19 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
             continue;
         }
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(text.as_str()) else { continue };
-        let Some(id) = frame["id"].as_u64().map(|id| id as u32) else { continue };
+        // Ids are 32-bit on the wire (the binary frames carry them in 4 bytes).
+        let Some(id) = frame["id"].as_u64().and_then(|id| u32::try_from(id).ok()) else { continue };
         tasks.retain(|_, (task, _)| !task.is_finished());
         match frame["t"].as_str() {
             Some("req") => {
                 let window = Arc::new(tokio::sync::Semaphore::new(WINDOW));
                 let task = tokio::spawn(serve(client.clone(), port, id, frame, out_tx.clone(), window.clone()));
-                tasks.insert(id, (task, window));
+                // The relay forgot an id it had handed out (it restarted):
+                // whatever was still answering under it would now be mistaken
+                // for the new request. Stop it; its window goes with it.
+                if let Some((old, _)) = tasks.insert(id, (task, window)) {
+                    old.abort();
+                }
             }
             Some("ack") => {
                 if let (Some((_, window)), Some(n)) = (tasks.get(&id), frame["n"].as_u64()) {
@@ -417,10 +454,212 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(first.key, second.key);
         assert!(first.id.len() >= 22 && first.key.len() >= 32);
+        // Fits a hostname label too: lowercase hex, 128 bits.
+        assert_eq!(first.id.len(), 32, "{}", first.id);
+        assert!(first.id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{}", first.id);
         assert_eq!(
             public_url("https://relay.example/", &dir).unwrap(),
             format!("https://relay.example/p/{}", first.id)
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(identity_path(&dir)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{mode:o}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_identity_from_an_older_release_is_kept_and_junk_is_replaced() {
+        let dir = std::env::temp_dir().join(format!("ipu-relay-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // base64url, mixed case: made by a release before hex ids. Never rotated.
+        let old = r#"{"id":"AbC-_dEf0123456789abcd","key":"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"}"#;
+        std::fs::write(identity_path(&dir), old).unwrap();
+        assert_eq!(load_identity(&dir).unwrap().id, "AbC-_dEf0123456789abcd");
+        // A file that is not an identity (and, being pre-existing, would make
+        // an exclusive create fail) is replaced rather than fatal.
+        std::fs::write(identity_path(&dir), "not json").unwrap();
+        let fresh = load_identity(&dir).unwrap();
+        assert_eq!(fresh.id.len(), 32);
+        assert_eq!(load_identity(&dir).unwrap().id, fresh.id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_line_does_not_carry_the_whole_id() {
+        assert_eq!(redacted_public_path("0123456789abcdef0123456789abcdef"), "/p/0123…");
+    }
+
+    /// What the relay side of a test looks like: a WebSocket server that
+    /// answers pings and sends whatever frames the test hands it, and a
+    /// stand-in for this daemon on loopback that accepts, reads, and never
+    /// answers, reporting when the tunnel drops the connection (the task
+    /// serving that request was aborted).
+    struct Harness {
+        frames: mpsc::Sender<String>,
+        daemon_events: mpsc::Receiver<DaemonEvent>,
+        tunnel: tokio::task::JoinHandle<Result<(), String>>,
+        dir: PathBuf,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum DaemonEvent {
+        Connected(usize),
+        Dropped(usize),
+    }
+
+    async fn harness(name: &str) -> Harness {
+        // The daemon the tunnel replays requests against.
+        let daemon = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = daemon.local_addr().unwrap().port();
+        let (events_tx, daemon_events) = mpsc::channel::<DaemonEvent>(16);
+        tokio::spawn(async move {
+            let mut n = 0;
+            loop {
+                let (mut tcp, _) = daemon.accept().await.unwrap();
+                n += 1;
+                let events_tx = events_tx.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let _ = events_tx.send(DaemonEvent::Connected(n)).await;
+                    let mut buf = [0u8; 4096];
+                    // Read the request (and never answer) until the peer goes away.
+                    while let Ok(read) = tcp.read(&mut buf).await {
+                        if read == 0 {
+                            break;
+                        }
+                    }
+                    let _ = events_tx.send(DaemonEvent::Dropped(n)).await;
+                });
+            }
+        });
+        // The relay.
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (frames, mut frames_rx) = mpsc::channel::<String>(16);
+        tokio::spawn(async move {
+            let (tcp, _) = relay.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            loop {
+                tokio::select! {
+                    incoming = ws.next() => match incoming {
+                        Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
+                            let _ = ws.send(Message::Text("pong".into())).await;
+                        }
+                        Some(Ok(_)) => {}
+                        _ => break,
+                    },
+                    frame = frames_rx.recv() => match frame {
+                        Some(text) => { let _ = ws.send(Message::Text(text.into())).await; }
+                        None => { let _ = ws.close(None).await; break; }
+                    },
+                }
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("ipu-relay-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let relay_url = format!("http://{relay_addr}");
+        let tunnel = {
+            let dir = dir.clone();
+            tokio::spawn(async move { run(&relay_url, &dir, port).await })
+        };
+        Harness { frames, daemon_events, tunnel, dir }
+    }
+
+    impl Harness {
+        async fn send(&self, frame: serde_json::Value) {
+            self.frames.send(frame.to_string()).await.unwrap();
+        }
+
+        async fn expect(&mut self, event: DaemonEvent) {
+            let got = tokio::time::timeout(Duration::from_secs(5), self.daemon_events.recv())
+                .await
+                .unwrap_or_else(|_| panic!("waited 5s for {event:?}"));
+            assert_eq!(got, Some(event));
+        }
+
+        async fn nothing_for(&mut self, wait: Duration) {
+            if let Ok(event) = tokio::time::timeout(wait, self.daemon_events.recv()).await {
+                panic!("unexpected {event:?}");
+            }
+        }
+
+        async fn close(self) {
+            drop(self.frames);
+            let result = tokio::time::timeout(Duration::from_secs(5), self.tunnel).await.unwrap().unwrap();
+            assert_eq!(result, Ok(()), "a relay that closes cleanly ends the session without error");
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn req(id: u32) -> serde_json::Value {
+        serde_json::json!({ "t": "req", "id": id, "m": "GET", "p": "/agent/slow", "h": [["x-test", "1"]] })
+    }
+
+    /// The relay handed out an id that is still being answered (it restarted
+    /// and lost count): the request under the old id is stopped so that its
+    /// answer cannot be taken for the new one.
+    #[test]
+    fn a_request_id_used_again_stops_the_request_still_running_under_it() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut h = harness("reuse").await;
+                h.send(req(7)).await;
+                h.expect(DaemonEvent::Connected(1)).await;
+                h.send(req(7)).await;
+                h.expect(DaemonEvent::Dropped(1)).await;
+                h.expect(DaemonEvent::Connected(2)).await;
+                // A different id leaves the running one alone.
+                h.send(req(8)).await;
+                h.expect(DaemonEvent::Connected(3)).await;
+                h.nothing_for(Duration::from_millis(300)).await;
+                h.close().await;
+            });
+    }
+
+    /// The relay says `cancel` (the client went away, or 30 s passed): the
+    /// request is stopped at once instead of running to completion for nobody.
+    #[test]
+    fn a_cancel_from_the_relay_stops_the_request() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut h = harness("cancel").await;
+                h.send(req(9)).await;
+                h.expect(DaemonEvent::Connected(1)).await;
+                h.send(req(10)).await;
+                h.expect(DaemonEvent::Connected(2)).await;
+                h.send(serde_json::json!({ "t": "cancel", "id": 9 })).await;
+                h.expect(DaemonEvent::Dropped(1)).await;
+                // Cancelling an id nobody is serving is harmless.
+                h.send(serde_json::json!({ "t": "cancel", "id": 999 })).await;
+                h.nothing_for(Duration::from_millis(300)).await;
+                h.close().await;
+            });
+    }
+
+    /// The tunnel session ends (the relay closed it): every request still in
+    /// flight is dropped with it, the next session starts clean.
+    #[test]
+    fn requests_in_flight_end_with_the_session() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut h = harness("session-end").await;
+                h.send(req(11)).await;
+                h.expect(DaemonEvent::Connected(1)).await;
+                drop(std::mem::replace(&mut h.frames, mpsc::channel(1).0));
+                h.expect(DaemonEvent::Dropped(1)).await;
+                h.close().await;
+            });
     }
 }
