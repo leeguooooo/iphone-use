@@ -31,6 +31,21 @@ const CHUNK: usize = 256 * 1024;
 /// viewer took them). A live picture past this drops whole frames; anything
 /// else waits.
 const WINDOW: usize = 512 * 1024;
+/// How often the phone pings the relay (answered without waking its object).
+#[cfg(not(test))]
+const PING_EVERY: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const PING_EVERY: Duration = Duration::from_millis(300);
+/// No message at all for this long means the link is dead: the phone left
+/// the Wi-Fi it dialled over, and the socket will never say so (no FIN, no
+/// RST reaches it). Give up on it and dial again over whatever network the
+/// phone has now (cellular). Three missed pongs.
+#[cfg(not(test))]
+const SILENCE_LIMIT: Duration = Duration::from_secs(45);
+#[cfg(test)]
+const SILENCE_LIMIT: Duration = Duration::from_secs(1);
+/// Each step of dialling the relay (TCP, TLS, WebSocket handshake).
+const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Identity {
@@ -52,9 +67,15 @@ pub fn spawn(relay_url: impl Fn() -> Option<String> + Send + 'static, state_dir:
         let mut backoff = 1u64;
         loop {
             if let Some(relay) = relay_url() {
+                let started = std::time::Instant::now();
                 match run(&relay, &state_dir, port).await {
                     Ok(()) => backoff = 1,
                     Err(error) => tracing::warn!("relay tunnel: {error}"),
+                }
+                // A tunnel that worked for a while and then broke (the phone
+                // changed networks) is dialled again at once.
+                if started.elapsed() > SILENCE_LIMIT * 2 {
+                    backoff = 1;
                 }
             }
             tokio::time::sleep(Duration::from_secs(backoff)).await;
@@ -104,8 +125,11 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
     let host = uri.host().ok_or("relay url has no host")?.to_string();
     let tls = uri.scheme_str() == Some("wss");
     let port_num = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), port_num))
+    // Bounded: right after a network change a dial can hang on a route that
+    // is already gone.
+    let tcp = tokio::time::timeout(DIAL_TIMEOUT, tokio::net::TcpStream::connect((host.as_str(), port_num)))
         .await
+        .map_err(|_| format!("connect {host}: timed out"))?
         .map_err(|e| format!("connect {host}: {e}"))?;
     let _ = tcp.set_nodelay(true);
     let (socket, _) = if tls {
@@ -117,13 +141,15 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
             .with_root_certificates(roots)
             .with_no_client_auth();
         let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| e.to_string())?;
-        let stream = tokio_rustls::TlsConnector::from(Arc::new(config))
-            .connect(name, tcp)
+        let stream = tokio::time::timeout(DIAL_TIMEOUT, tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp))
             .await
+            .map_err(|_| format!("tls {host}: timed out"))?
             .map_err(|e| format!("tls {host}: {e}"))?;
-        let (ws, response) = tokio_tungstenite::client_async(request, Box::new(stream) as Box<dyn Io>)
-            .await
-            .map_err(|e| format!("handshake: {e}"))?;
+        let (ws, response) =
+            tokio::time::timeout(DIAL_TIMEOUT, tokio_tungstenite::client_async(request, Box::new(stream) as Box<dyn Io>))
+                .await
+                .map_err(|_| "handshake: timed out".to_string())?
+                .map_err(|e| format!("handshake: {e}"))?;
         (ws, response)
     } else {
         tokio_tungstenite::client_async(request, Box::new(tcp) as Box<dyn Io>)
@@ -145,7 +171,7 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
         let out_tx = out_tx.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(25)).await;
+                tokio::time::sleep(PING_EVERY).await;
                 // The relay answers this text without waking its object.
                 if out_tx.send(Message::Text("ping".into())).await.is_err() {
                     break;
@@ -160,7 +186,11 @@ async fn run(relay: &str, state_dir: &Path, port: u16) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut tasks: HashMap<u32, (tokio::task::JoinHandle<()>, Arc<tokio::sync::Semaphore>)> = HashMap::new();
     let result = loop {
-        let Some(message) = stream.next().await else { break Ok(()) };
+        let message = match tokio::time::timeout(SILENCE_LIMIT, stream.next()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => break Ok(()),
+            Err(_) => break Err(format!("no answer from the relay for {}s; dialling again", SILENCE_LIMIT.as_secs())),
+        };
         let text = match message {
             Ok(Message::Text(text)) => text,
             Ok(Message::Close(_)) => break Ok(()),
@@ -339,6 +369,43 @@ mod tests {
             }
             assert_eq!(parts, vec![b"--B\r\nA1\r\n".to_vec(), b"--B\r\nBB22\r\n".to_vec()], "chunk {size}");
         }
+    }
+
+    /// The phone left the Wi-Fi it dialled over: the relay's socket goes
+    /// quiet without ever closing. The tunnel must give up and dial again
+    /// rather than wait on it forever (seen on an iPhone 17, 2026-11-07).
+    #[test]
+    fn a_relay_that_goes_silent_is_dropped_so_the_phone_dials_again() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(silent_relay());
+    }
+
+    async fn silent_relay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (dialled, mut accepted) = mpsc::channel::<()>(4);
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                // Complete the handshake, then never read or answer a ping.
+                held.push(tokio_tungstenite::accept_async(tcp).await.unwrap());
+                let _ = dialled.send(()).await;
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("ipu-relay-silent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = std::time::Instant::now();
+        let result = run(&format!("http://{addr}"), &dir, 1).await;
+        assert!(accepted.recv().await.is_some());
+        let error = result.expect_err("a silent relay must end the tunnel");
+        assert!(error.contains("no answer from the relay"), "{error}");
+        let took = started.elapsed();
+        assert!(took >= SILENCE_LIMIT && took < SILENCE_LIMIT * 3, "{took:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
