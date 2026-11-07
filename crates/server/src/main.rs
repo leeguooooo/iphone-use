@@ -1434,8 +1434,13 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         }
 
         // The cloud relay, when configured: reach this daemon from anywhere.
-        if let Some(relay) = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty()) {
+        // Only with a password — the relay puts every route on the internet.
+        let relay = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty());
+        if server::remote::relay_allowed(cfg.password.is_some(), relay.as_deref()) {
+            let relay = relay.unwrap_or_default();
             server::relay_client::spawn(move || Some(relay.clone()), server::instance::current().state_dir.clone(), cfg.port);
+        } else if relay.is_some() {
+            tracing::warn!("IPHONE_USE_RELAY_URL ignored: {}", server::remote::REQUIRES_PASSWORD);
         }
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)

@@ -245,8 +245,21 @@ pub fn status(state_dir: &Path, password_set: bool, port: u16) -> Value {
     })
 }
 
-fn requires_password() -> Value {
-    json!("remote access needs a password: re-run install.sh, or set IPHONE_USE_PASSWORD, then turn it on again")
+/// Why remote access stays off without a password; the same words wherever a
+/// path to this daemon from outside the LAN is refused (status, the relay).
+pub const REQUIRES_PASSWORD: &str =
+    "remote access needs a password: re-run install.sh, or set IPHONE_USE_PASSWORD, then turn it on again";
+
+pub(crate) fn requires_password() -> Value {
+    json!(REQUIRES_PASSWORD)
+}
+
+/// May the cloud relay (`IPHONE_USE_RELAY_URL`, or the `relay.json` a Mac
+/// drops for the phone-hosted daemon) be dialled? Only a daemon with a
+/// password: the relay makes every route reachable from the internet, and an
+/// open daemon's routes are open.
+pub fn relay_allowed(password_set: bool, url: Option<&str>) -> bool {
+    password_set && url.is_some_and(|url| !url.is_empty())
 }
 
 fn tailscale_status(
@@ -853,6 +866,15 @@ fn write_cloudflare_status(state_dir: &Path, st: &CloudflareStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_relay_needs_a_password_and_an_address() {
+        assert!(relay_allowed(true, Some("https://relay.example")));
+        assert!(!relay_allowed(false, Some("https://relay.example")), "no password: open routes stay on the LAN");
+        assert!(!relay_allowed(true, None));
+        assert!(!relay_allowed(true, Some("")));
+        assert!(!relay_allowed(false, None));
+    }
 
     #[test]
     fn hostnames_follow_the_instance_and_dns_rules() {
