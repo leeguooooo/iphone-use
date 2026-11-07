@@ -777,10 +777,9 @@ async fn agent_owner_inner(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    // Cookie sessions may release too: the web page holds a lease under its
-    // own `X-Phone-Owner` and lets go of it on pagehide. The owner-name check
-    // below still stops one client from ending another's lease.
-    match browser_or_agent_auth(&state, &headers) {
+    // Bearer only (agent_loop_e2e pins this: a cookie never opens a bearer
+    // route). The web page therefore cannot end its own lease; it lapses.
+    match agent_auth(&state, &headers) {
         AgentAuth::Locked => {
             return with_security_headers(
                 (StatusCode::TOO_MANY_REQUESTS, "too many attempts").into_response(),

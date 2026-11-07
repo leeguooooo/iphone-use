@@ -3290,21 +3290,10 @@ window.addEventListener('pagehide', () => {
   cancelStatusPoll();
   setDirectControlReady(false);
   stopStills();
-  releaseWebOwner();
+  // The lease this page took with its taps is not released here: /agent/owner
+  // is a bearer-only route and the page holds a cookie. It lapses on its own
+  // (300 s), the same as the iOS app's lease.
 });
-// Let go of the owner lease this page took with its taps, so an agent is not
-// told `phone_owned web-…` for up to five minutes after the tab closes. The
-// daemon only ends the lease when the name matches, so this cannot end
-// another client's lease. keepalive lets the request outlive the page.
-function releaseWebOwner() {
-  try {
-    void fetch(BASE + '/agent/owner', {
-      method: 'POST', credentials: 'same-origin', keepalive: true,
-      headers: { 'Content-Type': 'application/json', 'X-Phone-Control': '1', 'X-Phone-Owner': WEB_OWNER },
-      body: '{"release":true}',
-    }).catch(() => {});
-  } catch (_) {}
-}
 window.addEventListener('pageshow', () => {
   if (document.visibilityState === 'visible') {
     cancelStatusPoll();
