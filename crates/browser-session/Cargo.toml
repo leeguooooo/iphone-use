@@ -16,7 +16,7 @@ required-features = ["desktop"]
 desktop = ["dep:clap", "dep:rpassword", "dep:rusqlite", "dep:url", "dep:chrono", "dep:fs2"]
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = "0.5"
 base64 = "0.22"
 rand = "0.8"
