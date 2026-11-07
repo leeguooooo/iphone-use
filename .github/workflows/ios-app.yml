@@ -29,12 +29,14 @@ permissions:
 jobs:
   unit-tests:
     name: Remote app unit tests (simulator)
-    runs-on: macos-15
+    # The app is written against the current Swift concurrency rules and does
+    # not compile with Xcode 16.2 (main-actor isolation errors in
+    # DeviceSession.swift / LocalControlAcceptance.swift), so this job uses the
+    # newest hosted image and whatever Xcode it ships, unlike the other macOS
+    # jobs which pin Xcode 16.2.
+    runs-on: macos-26
     timeout-minutes: 40
     env:
-      # Same Xcode as the other macOS jobs; its iOS 18.2 runtime ships with it,
-      # so the destination below needs no runtime download.
-      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,19 +69,18 @@ jobs:
       # Simulator builds sign ad hoc and need no team or profile; the README
       # warns against CODE_SIGNING_ALLOWED=NO because an unsigned simulator
       # app has no Keychain, which the store tests rely on.
-      # Hosted macOS images do not ship every Simulator runtime; fetch the
-      # pinned one the same way simulator-smoke.yml does and create a device
-      # for it, since "name=iPhone 16,OS=18.2" is not available by default.
-      - name: Ensure iOS 18.2 runtime
-        timeout-minutes: 15
-        run: bash scripts/ensure-simulator-runtime.sh com.apple.CoreSimulator.SimRuntime.iOS-18-2 18.2 "$RUNNER_TEMP/pinned-runtime-18.2"
-
+      # Create a device on the newest iOS runtime the image ships (no runtime
+      # download), with the newest plain iPhone device type.
       - name: Create the test simulator
         id: simulator
         run: |
           set -euo pipefail
+          xcodebuild -version
+          runtime=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r["isAvailable"]]; rs.sort(key=lambda r: [int(x) for x in r["version"].split(".")]); print(rs[-1]["identifier"])')
+          devtype=$(xcrun simctl list devicetypes -j | python3 -c 'import json,sys,re; ds=[d["identifier"] for d in json.load(sys.stdin)["devicetypes"] if re.fullmatch(r"com\.apple\.CoreSimulator\.SimDeviceType\.iPhone-\d+", d["identifier"])]; ds.sort(key=lambda d: int(d.rsplit("-",1)[1])); print(ds[-1])')
+          echo "runtime=$runtime devtype=$devtype"
           name="ipu-app-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          sim=$(xcrun simctl create "$name" com.apple.CoreSimulator.SimDeviceType.iPhone-16 com.apple.CoreSimulator.SimRuntime.iOS-18-2)
+          sim=$(xcrun simctl create "$name" "$devtype" "$runtime")
           python3 -c 'import sys,uuid; uuid.UUID(sys.argv[1])' "$sim"
           xcrun simctl boot "$sim"
           xcrun simctl bootstatus "$sim" -b
