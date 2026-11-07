@@ -304,7 +304,7 @@ pub const IMAGE_SIDES: [u32; 3] = [1200, 800, 500];
 /// The whole JSON answer must stay under a standard client's 4 MB read
 /// limit, so text is never pushed out by an image; 1.5 MB also keeps the
 /// base64 image a model is handed within what clients pass on whole.
-pub const DEFAULT_IMAGE_BUDGET_BYTES: usize = 1_500_000;
+pub const DEFAULT_IMAGE_BUDGET_BYTES: usize = 2_500_000;
 
 /// The response budget (`IPHONE_USE_IMAGE_BUDGET_BYTES` overrides it).
 pub fn image_budget_bytes() -> usize {

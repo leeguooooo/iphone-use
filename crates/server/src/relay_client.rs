@@ -580,6 +580,20 @@ mod tests {
             assert_eq!(got, Some(event));
         }
 
+        /// Two events whose order the scheduler decides (the old task's drop
+        /// and the new task's connect race each other).
+        async fn expect_unordered(&mut self, a: DaemonEvent, b: DaemonEvent) {
+            let mut want = vec![a, b];
+            for _ in 0..2 {
+                let got = tokio::time::timeout(Duration::from_secs(5), self.daemon_events.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("waited 5s for {want:?}"))
+                    .expect("daemon event channel closed");
+                let at = want.iter().position(|w| *w == got).unwrap_or_else(|| panic!("unexpected {got:?}, wanted one of {want:?}"));
+                want.remove(at);
+            }
+        }
+
         async fn nothing_for(&mut self, wait: Duration) {
             if let Ok(event) = tokio::time::timeout(wait, self.daemon_events.recv()).await {
                 panic!("unexpected {event:?}");
@@ -612,8 +626,7 @@ mod tests {
                 h.send(req(7)).await;
                 h.expect(DaemonEvent::Connected(1)).await;
                 h.send(req(7)).await;
-                h.expect(DaemonEvent::Dropped(1)).await;
-                h.expect(DaemonEvent::Connected(2)).await;
+                h.expect_unordered(DaemonEvent::Dropped(1), DaemonEvent::Connected(2)).await;
                 // A different id leaves the running one alone.
                 h.send(req(8)).await;
                 h.expect(DaemonEvent::Connected(3)).await;

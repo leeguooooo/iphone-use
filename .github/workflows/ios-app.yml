@@ -36,7 +36,6 @@ jobs:
       # so the destination below needs no runtime download.
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       CARGO_TERM_COLOR: always
-      SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone 16,OS=18.2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -68,17 +67,34 @@ jobs:
       # Simulator builds sign ad hoc and need no team or profile; the README
       # warns against CODE_SIGNING_ALLOWED=NO because an unsigned simulator
       # app has no Keychain, which the store tests rely on.
+      # Hosted macOS images do not ship every Simulator runtime; fetch the
+      # pinned one the same way simulator-smoke.yml does and create a device
+      # for it, since "name=iPhone 16,OS=18.2" is not available by default.
+      - name: Ensure iOS 18.2 runtime
+        timeout-minutes: 15
+        run: bash scripts/ensure-simulator-runtime.sh com.apple.CoreSimulator.SimRuntime.iOS-18-2 18.2 "$RUNNER_TEMP/pinned-runtime-18.2"
+
+      - name: Create the test simulator
+        id: simulator
+        run: |
+          set -euo pipefail
+          name="ipu-app-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sim=$(xcrun simctl create "$name" com.apple.CoreSimulator.SimDeviceType.iPhone-16 com.apple.CoreSimulator.SimRuntime.iOS-18-2)
+          python3 -c 'import sys,uuid; uuid.UUID(sys.argv[1])' "$sim"
+          xcrun simctl boot "$sim"
+          xcrun simctl bootstatus "$sim" -b
+          echo "udid=$sim" >> "$GITHUB_OUTPUT"
+
       - name: xcodebuild test
         working-directory: apps/ios
         run: |
           set -euo pipefail
-          xcrun simctl list devices available | grep -F 'iPhone 16 (' >/dev/null
           # -quiet keeps the log to warnings, errors and the test summary;
           # pipefail makes the tee report xcodebuild's status.
           xcodebuild -quiet test \
             -project PhoneUseRemoteOnly.xcodeproj \
             -scheme IPhoneUseRemote \
-            -destination "$SIMULATOR_DESTINATION" \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
             -resultBundlePath "$RUNNER_TEMP/IPhoneUseRemote.xcresult" \
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
