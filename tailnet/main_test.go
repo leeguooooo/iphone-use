@@ -100,11 +100,11 @@ func runningStatus(tagged bool) *ipnstate.Status {
 
 func TestStatusJSONShape(t *testing.T) {
 	now := time.Date(2026, 11, 7, 1, 2, 3, 0, time.UTC)
-	b, _ := json.Marshal(buildStatus(nil, false, "", now))
+	b, _ := json.Marshal(buildStatus(nil, false, false, "", now))
 	var m map[string]any
 	json.Unmarshal(b, &m)
 	keys := []string{"version", "pid", "state", "backend_state", "login_url", "dns_name", "tailnet_ips", "https",
-		"magic_dns", "owner", "allow_tailnet_members", "hint", "error", "updated_at"}
+		"https_pending", "magic_dns", "owner", "allow_tailnet_members", "hint", "error", "updated_at"}
 	if len(m) != len(keys) {
 		t.Errorf("got %d keys: %s", len(m), b)
 	}
@@ -120,33 +120,39 @@ func TestStatusJSONShape(t *testing.T) {
 		t.Errorf("tailnet_ips must be [] not null: %s", b)
 	}
 
-	d := buildStatus(runningStatus(false), false, "", now)
+	d := buildStatus(runningStatus(false), false, true, "", now)
 	if d.State != "running" || *d.DNSName != "iphone-use-1.tail1eab92.ts.net" || !d.HTTPS || !d.MagicDNS ||
 		*d.Owner != "me@example.com" || d.Hint != nil || len(d.TailnetIPs) != 2 {
 		t.Errorf("running doc: %+v", d)
 	}
 
+	// Certificates on but not fetched yet: no HTTPS address until it is.
+	if d := buildStatus(runningStatus(false), false, false, "", now); d.HTTPS || !d.HTTPSPending ||
+		d.Hint == nil || *d.Hint != hintCertPending {
+		t.Errorf("cert pending: %+v", d)
+	}
+
 	st := runningStatus(false)
 	st.CertDomains = nil
-	if d := buildStatus(st, false, "", now); d.HTTPS || d.Hint == nil || *d.Hint != hintHTTPS {
+	if d := buildStatus(st, false, true, "", now); d.HTTPS || d.Hint == nil || *d.Hint != hintHTTPS {
 		t.Errorf("https off: %+v", d)
 	}
-	if d := buildStatus(runningStatus(true), false, "", now); d.Owner != nil || d.Hint == nil || *d.Hint != hintTagged {
+	if d := buildStatus(runningStatus(true), false, true, "", now); d.Owner != nil || d.Hint == nil || *d.Hint != hintTagged {
 		t.Errorf("tagged: %+v", d)
 	}
 
 	nl := &ipnstate.Status{BackendState: "NeedsLogin", AuthURL: "https://login.tailscale.com/a/abc"}
-	if d := buildStatus(nl, false, "", now); d.State != "needs_login" || *d.LoginURL != nl.AuthURL {
+	if d := buildStatus(nl, false, false, "", now); d.State != "needs_login" || *d.LoginURL != nl.AuthURL {
 		t.Errorf("needs login: %+v", d)
 	}
-	if d := buildStatus(nil, false, "boom", now); d.State != "error" || *d.Error != "boom" {
+	if d := buildStatus(nil, false, false, "boom", now); d.State != "error" || *d.Error != "boom" {
 		t.Errorf("error: %+v", d)
 	}
 }
 
 func TestWriteStatusFileAtomic(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "status.json")
-	if err := writeStatusFile(p, buildStatus(nil, true, "", time.Now())); err != nil {
+	if err := writeStatusFile(p, buildStatus(nil, true, false, "", time.Now())); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(p)
@@ -191,7 +197,7 @@ func TestGatewayProxy(t *testing.T) {
 	if rec.Code != 200 || rec.Body.String() != "ok" {
 		t.Fatalf("proxy: %d %s", rec.Code, rec.Body)
 	}
-	if gotURL != "/agent/h264?fps=30" || gotHost != upURL.Host {
+	if gotURL != "/agent/h264?fps=30" || gotHost != "iphone.ts.net" {
 		t.Errorf("url=%s host=%s", gotURL, gotHost)
 	}
 	if got.Get("X-Forwarded-For") != "100.64.0.9" || got.Get("X-Iphone-Use-Tailnet-User") != "me@example.com" ||

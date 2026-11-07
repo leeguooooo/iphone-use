@@ -205,6 +205,7 @@ pub struct TailnetStatus {
     pub dns_name: Option<String>,
     pub tailnet_ips: Vec<String>,
     pub https: bool,
+    pub https_pending: bool,
     pub magic_dns: bool,
     pub owner: Option<String>,
     pub hint: Option<String>,
@@ -278,6 +279,7 @@ fn tailscale_status(
         "plain_url": if state == "running" { plain_url } else { None },
         "login_url": if state == "needs_login" { st.login_url.clone() } else { None },
         "https": st.https,
+        "https_pending": st.https_pending,
         "magic_dns": st.magic_dns,
         "owner": st.owner,
         "allow_tailnet_members": cfg.allow_tailnet_members,
@@ -389,30 +391,32 @@ pub fn spawn_supervisor(inputs: SupervisorInputs) {
                 let allowed = inputs.password_set;
                 let ts_want = (cfg.tailscale.enabled && allowed)
                     .then(|| tailnet_command(&inputs, &cfg.tailscale));
-                tailnet.reconcile(&inputs.state_dir, ts_want, None);
+                tailnet.reconcile(&inputs.state_dir, ts_want, None, |_| {});
                 if tailnet.child.is_some() {
                     forward_login_request(&inputs.state_dir, &tailnet);
                 }
 
                 let cf_want = (cfg.cloudflare.enabled && allowed)
                     .then(|| cloudflared_command(&inputs, &cfg.cloudflare));
-                let started = cloudflare.reconcile(
+                cloudflare.reconcile(
                     &inputs.state_dir,
                     cf_want,
                     Some(cloudflared_line_hook(
                         cf_status.clone(),
                         inputs.state_dir.clone(),
                     )),
+                    // Before its log reader starts, so no line of the new
+                    // process is applied to the old one's status.
+                    |pid| {
+                        let mut st = cf_status.lock().unwrap();
+                        *st = CloudflareStatus {
+                            pid: Some(pid),
+                            state: "starting".into(),
+                            ..Default::default()
+                        };
+                        write_cloudflare_status(&inputs.state_dir, &st);
+                    },
                 );
-                if started {
-                    let mut st = cf_status.lock().unwrap();
-                    *st = CloudflareStatus {
-                        pid: cloudflare.child.as_ref().map(|c| c.id()),
-                        state: "starting".into(),
-                        ..Default::default()
-                    };
-                    write_cloudflare_status(&inputs.state_dir, &st);
-                }
                 if !cfg.cloudflare.enabled || !allowed {
                     let _ = std::fs::remove_file(cloudflare_status_path(&inputs.state_dir));
                 } else if let Some(error) = cloudflare.last_error.take() {
@@ -420,6 +424,13 @@ pub fn spawn_supervisor(inputs: SupervisorInputs) {
                     st.state = "error".into();
                     st.error = Some(error);
                     write_cloudflare_status(&inputs.state_dir, &st);
+                } else if cloudflare.child.is_none() {
+                    // cloudflared exited and waits for its restart: its URL no
+                    // longer answers (a quick tunnel gets a new one).
+                    let mut st = cf_status.lock().unwrap();
+                    if mark_cloudflared_down(&mut st) {
+                        write_cloudflare_status(&inputs.state_dir, &st);
+                    }
                 }
                 std::thread::sleep(TICK);
             }
@@ -455,6 +466,7 @@ impl Helper {
         state_dir: &Path,
         want: Option<Result<Vec<String>, String>>,
         on_line: Option<LineHook>,
+        on_spawn: impl FnOnce(u32),
     ) -> bool {
         // Notice an exit first.
         if let Some(child) = self.child.as_mut() {
@@ -522,6 +534,7 @@ impl Helper {
             Ok(mut child) => {
                 tracing::info!("remote access: started {} (pid {})", self.name, child.id());
                 let _ = std::fs::write(pid_path(state_dir, self.name), child.id().to_string());
+                on_spawn(child.id());
                 if let Some(stderr) = child.stderr.take() {
                     let mut log_file = log_file;
                     let mut on_line = on_line;
@@ -775,13 +788,26 @@ type LineHook = Box<dyn FnMut(u32, &str) + Send>;
 fn cloudflared_line_hook(status: Arc<Mutex<CloudflareStatus>>, state_dir: PathBuf) -> LineHook {
     Box::new(move |pid, line| {
         let mut st = status.lock().unwrap();
-        if st.pid.is_some_and(|current| current != pid) {
+        if st.pid != Some(pid) {
             return; // an older cloudflared still flushing its last lines
         }
         if apply_cloudflared_line(&mut st, line) {
             write_cloudflare_status(&state_dir, &st);
         }
     })
+}
+
+/// cloudflared is not running: nothing answers at its URL. True when this
+/// changed `st`.
+fn mark_cloudflared_down(st: &mut CloudflareStatus) -> bool {
+    if st.state == "running" || st.url.is_some() || st.connections > 0 {
+        st.state = "starting".into();
+        st.url = None;
+        st.connections = 0;
+        st.pid = None;
+        return true;
+    }
+    false
 }
 
 /// Update `st` from one cloudflared log line; true when it changed.
@@ -893,6 +919,23 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("Invalid tunnel secret"));
+    }
+
+    #[test]
+    fn an_exited_cloudflared_no_longer_reports_its_url() {
+        let mut st = CloudflareStatus {
+            pid: Some(7),
+            state: "running".into(),
+            url: Some("https://a-b.trycloudflare.com".into()),
+            connections: 4,
+            error: None,
+        };
+        assert!(mark_cloudflared_down(&mut st));
+        assert_eq!(
+            (st.state.as_str(), st.url.as_deref(), st.connections),
+            ("starting", None, 0)
+        );
+        assert!(!mark_cloudflared_down(&mut st));
     }
 
     #[test]

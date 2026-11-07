@@ -225,10 +225,22 @@ fn wait_tailscale(target: &Target, state_dir: &Path) -> Result<i32> {
     let started = Instant::now();
     let mut shown_login: Option<String> = None;
     let mut warned_daemon = false;
+    let mut cert_wait: Option<Instant> = None;
+    let mut cert_told = false;
     loop {
         let st = remote::status(state_dir, target.has_password(), target.port());
         let ts = &st["tailscale"];
         match ts["state"].as_str().unwrap_or("") {
+            "running"
+                if ts["https_pending"] == true
+                    && cert_wait.get_or_insert_with(Instant::now).elapsed()
+                        < Duration::from_secs(90) =>
+            {
+                if !cert_told {
+                    cert_told = true;
+                    println!("Signed in; getting the HTTPS certificate (the first one can take a minute)…");
+                }
+            }
             "running" => {
                 let _ = std::fs::remove_file(remote::tailnet_auth_key_path(state_dir));
                 println!(
@@ -467,7 +479,7 @@ fn print_agent_hint(target: &Target, url: &str) {
         server::instance::DEFAULT_NAME => String::new(),
         name => format!(" --instance {name}"),
     };
-    println!("  Agents on another computer: IPHONE_USE_URL={url} IPHONE_USE_TOKEN=<this daemon's password>");
+    println!("  Agents on another computer: IPHONE_USE_URL={url} IPHONE_USE_TOKEN=<this daemon's agent token, or its password when it has none>");
     println!("  Pair a phone elsewhere: iphone-use remote pair{instance}");
 }
 

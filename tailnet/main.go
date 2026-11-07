@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -125,10 +126,10 @@ func cmdServe(args []string) error {
 		}
 	}
 	fail := func(err error) error {
-		writeStatus(buildStatus(nil, *allowMembers, err.Error(), time.Now()))
+		writeStatus(buildStatus(nil, *allowMembers, false, err.Error(), time.Now()))
 		return err
 	}
-	writeStatus(buildStatus(nil, *allowMembers, "", time.Now()))
+	writeStatus(buildStatus(nil, *allowMembers, false, "", time.Now()))
 
 	srv, logFile, err := newServer(*stateDir, *hostname, *controlURL, authKey)
 	if err != nil {
@@ -189,6 +190,7 @@ func cmdServe(args []string) error {
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
 	tick := time.NewTicker(statusInterval)
 	defer tick.Stop()
+	certs := &certWarmer{}
 	refresh := func() {
 		sctx, scancel := context.WithTimeout(ctx, 5*time.Second)
 		st, err := lc.Status(sctx)
@@ -199,7 +201,10 @@ func cmdServe(args []string) error {
 		}
 		n := nodeFromStatus(st)
 		node.Store(&n)
-		writeStatus(buildStatus(st, *allowMembers, "", time.Now()))
+		if n.Running && len(st.CertDomains) > 0 && n.DNSName != "" {
+			certs.ensure(ctx, lc, n.DNSName, poke)
+		}
+		writeStatus(buildStatus(st, *allowMembers, certs.ready(n.DNSName), "", time.Now()))
 	}
 	refresh()
 	for {
@@ -218,7 +223,7 @@ func cmdServe(args []string) error {
 				poke()
 				continue
 			}
-			d := buildStatus(nil, *allowMembers, "", time.Now())
+			d := buildStatus(nil, *allowMembers, false, "", time.Now())
 			d.State = stateStopped
 			writeStatus(d)
 			return nil
@@ -281,4 +286,49 @@ func cmdLogout(args []string) error {
 		}
 	}
 	return err
+}
+
+// certWarmer fetches the node's HTTPS certificate in the background (the
+// first one comes from Let's Encrypt and can take a minute), retrying a
+// failure after a minute.
+type certWarmer struct {
+	mu       sync.Mutex
+	name     string
+	have     bool
+	inFlight bool
+	retryAt  time.Time
+}
+
+func (c *certWarmer) ready(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.have && c.name == name
+}
+
+func (c *certWarmer) ensure(ctx context.Context, lc *local.Client, name string, done func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.name != name {
+		c.name, c.have, c.inFlight, c.retryAt = name, false, false, time.Time{}
+	}
+	if c.have || c.inFlight || time.Now().Before(c.retryAt) {
+		return
+	}
+	c.inFlight = true
+	go func() {
+		cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		_, _, err := lc.CertPair(cctx, name)
+		cancel()
+		c.mu.Lock()
+		if c.name == name {
+			c.inFlight = false
+			c.have = err == nil
+			if err != nil {
+				log.Printf("https certificate for %s: %v", name, err)
+				c.retryAt = time.Now().Add(time.Minute)
+			}
+		}
+		c.mu.Unlock()
+		done()
+	}()
 }

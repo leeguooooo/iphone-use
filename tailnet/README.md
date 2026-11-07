@@ -85,3 +85,7 @@ cd tailnet && go vet ./... && go test ./...
 server and DERP, no network beyond loopback): the owner's own device is proxied with
 our forwarding headers and an unbuffered stream, another user gets 403, and
 `--allow-tailnet-members` lets them in.
+
+`go.mod` lists test-only modules (vmtest, go-tpm-tools, …) that
+`tstest/integration` pulls in for the end-to-end test. They are not linked into
+the binary; keep them, or `go test -tags integration` stops building.

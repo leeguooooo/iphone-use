@@ -25,6 +25,7 @@ const (
 	hintLogin       = "open login_url and sign in to add this iPhone to your tailnet"
 	hintMachineAuth = "approve this device in the Tailscale admin console (Machines)"
 	hintHTTPS       = "enable HTTPS certificates in the Tailscale admin console: DNS → HTTPS Certificates"
+	hintCertPending = "getting the HTTPS certificate for this device (first time: up to a minute); the plain address works meanwhile"
 	hintMagicDNS    = "enable MagicDNS in the Tailscale admin console: DNS → MagicDNS"
 	hintTagged      = "this node is tagged, so it has no owning user; owner-only access cannot work — turn on allow-tailnet-members to let tailnet members in"
 )
@@ -39,6 +40,7 @@ type statusDoc struct {
 	DNSName             *string  `json:"dns_name"`
 	TailnetIPs          []string `json:"tailnet_ips"`
 	HTTPS               bool     `json:"https"`
+	HTTPSPending        bool     `json:"https_pending"`
 	MagicDNS            bool     `json:"magic_dns"`
 	Owner               *string  `json:"owner"`
 	AllowTailnetMembers bool     `json:"allow_tailnet_members"`
@@ -90,7 +92,10 @@ func nodeFromStatus(st *ipnstate.Status) nodeInfo {
 
 // buildStatus turns a LocalClient status into the status-file document.
 // st may be nil (not started yet); errMsg forces state "error".
-func buildStatus(st *ipnstate.Status, allowMembers bool, errMsg string, now time.Time) statusDoc {
+// certReady says whether this node's HTTPS certificate is already in hand:
+// HTTPS is reported only then, so nobody is handed an address whose first
+// visit waits on certificate issuance.
+func buildStatus(st *ipnstate.Status, allowMembers bool, certReady bool, errMsg string, now time.Time) statusDoc {
 	d := statusDoc{
 		Version:             1,
 		PID:                 os.Getpid(),
@@ -107,7 +112,9 @@ func buildStatus(st *ipnstate.Status, allowMembers bool, errMsg string, now time
 		for _, ip := range st.TailscaleIPs {
 			d.TailnetIPs = append(d.TailnetIPs, ip.String())
 		}
-		d.HTTPS = len(st.CertDomains) > 0
+		certsOn := len(st.CertDomains) > 0
+		d.HTTPS = certsOn && certReady
+		d.HTTPSPending = certsOn && !certReady
 		if st.CurrentTailnet != nil {
 			d.MagicDNS = st.CurrentTailnet.MagicDNSEnabled
 		}
@@ -130,7 +137,9 @@ func buildStatus(st *ipnstate.Status, allowMembers bool, errMsg string, now time
 			if !d.MagicDNS {
 				hints = append(hints, hintMagicDNS)
 			}
-			if !d.HTTPS {
+			if d.HTTPSPending {
+				hints = append(hints, hintCertPending)
+			} else if !d.HTTPS {
 				hints = append(hints, hintHTTPS)
 			}
 		}

@@ -67,6 +67,7 @@ func fakeDaemon(t *testing.T) *httptest.Server {
 			"via":   r.Header.Get("X-Iphone-Use-Via"),
 			"user":  r.Header.Get("X-Iphone-Use-Tailnet-User"),
 			"real":  r.Header.Get("X-Real-Ip"),
+			"rhost": r.Host,
 		})
 	}))
 	t.Cleanup(srv.Close)
@@ -174,7 +175,10 @@ func TestTailnetEndToEnd(t *testing.T) {
 		}
 		if m["path"] != "/agent/status?x=1" || m["proto"] != "http" || m["via"] != "tailnet" ||
 			m["for"] == "6.6.6.6" || m["real"] != "" || m["user"] == "attacker@example.com" ||
-			!strings.HasPrefix(m["for"], "100.") || m["user"] == "" {
+			!strings.HasPrefix(m["for"], "100.") || m["user"] == "" ||
+			// The daemon builds its pairing links from Host: it must be the
+			// tailnet address the client used, not the upstream's loopback.
+			m["rhost"] != ipv4(st)+":44321" {
 			t.Fatalf("forwarded headers wrong: %v", m)
 		}
 		t.Logf("proxied with %v", m)

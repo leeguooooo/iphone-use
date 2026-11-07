@@ -110,8 +110,12 @@ func newGateway(upstream *url.URL, who whoIser, node *atomic.Pointer[nodeInfo], 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			f := pr.In.Context().Value(ctxKey{}).(fwd)
-			pr.SetURL(upstream) // path/query kept; Host set to upstream
+			pr.SetURL(upstream)
 			pr.Out.URL.Path, pr.Out.URL.RawPath = pr.In.URL.Path, pr.In.URL.RawPath
+			// Keep the address the client used: the daemon builds the links on
+			// its pairing page (iphoneuse://pair?u=…) from Host, and the
+			// upstream's 127.0.0.1 would send the app nowhere.
+			pr.Out.Host = pr.In.Host
 			sanitizeHeaders(pr.Out.Header)
 			setForwardHeaders(pr.Out.Header, f.proto, pr.In.Host, f.c)
 		},
