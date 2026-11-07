@@ -1,5 +1,7 @@
 # Single calls vs one batch — iPhone 13, 2026-10-07
 
+> Historical: a one-off measurement from 2026-10-07, kept for the record and not updated for later builds.
+
 A matched-task comparison of two ways to use the **same build**. It is not a
 comparison between versions and makes no general speed-up claim.
 

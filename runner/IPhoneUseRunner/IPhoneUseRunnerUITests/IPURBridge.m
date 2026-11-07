@@ -378,14 +378,23 @@ static BOOL IPURUseRequestCache(void)
 + (nullable NSString *)bundleIDForPID:(int)pid
 {
   if (pid <= 0) return nil;
+  // pid -> bundle id, kept for 60 s: pids are recycled after an app quits, and a stale
+  // entry would name the wrong app (one lookup per minute per pid is cheap).
+  static const CFTimeInterval kBundleIDCacheTTL = 60;
   static NSMutableDictionary<NSNumber *, NSString *> *cache;
+  static NSMutableDictionary<NSNumber *, NSNumber *> *cachedAt;
   static dispatch_once_t once;
   dispatch_once(&once, ^{
     cache = [NSMutableDictionary dictionary];
+    cachedAt = [NSMutableDictionary dictionary];
   });
+  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
   @synchronized(cache) {
     NSString *cached = cache[@(pid)];
-    if (cached != nil) return cached;
+    NSNumber *storedAt = cachedAt[@(pid)];
+    if (cached != nil && storedAt != nil && now - storedAt.doubleValue < kBundleIDCacheTTL) return cached;
+    [cache removeObjectForKey:@(pid)];
+    [cachedAt removeObjectForKey:@(pid)];
   }
   id bundleID = IPURObject([self applicationForPID:pid], @"bundleID");
   if (![bundleID isKindOfClass:NSString.class] || [(NSString *)bundleID length] == 0) {
@@ -408,6 +417,7 @@ static BOOL IPURUseRequestCache(void)
   if (![bundleID isKindOfClass:NSString.class] || [(NSString *)bundleID length] == 0) return nil;
   @synchronized(cache) {
     cache[@(pid)] = bundleID;
+    cachedAt[@(pid)] = @(now);
   }
   return bundleID;
 }
@@ -954,7 +964,9 @@ static NSMutableDictionary *IPURSerialize(
 
   node[@"type"] = [IPURBridge elementTypeName:elementType];
   node[@"label"] = label ?: (id)NSNull.null;
-  // runner's name: the identifier when there is one, else the label.
+  // runner's name: the identifier when there is one, else the label. It duplicates
+  // rawIdentifier/label, but the daemon's tree parser reads `name` (crates/server/src/runner.rs,
+  // core element_selector), so it stays as part of the wire format.
   node[@"name"] = identifier ?: label ?: (id)NSNull.null;
   node[@"value"] = value ?: (id)NSNull.null;
   id valueTruncated = IPURKVC(snapshot, @"isTruncatedValue");

@@ -564,7 +564,7 @@ fn print_status(target: &Target, status: &Value) {
     if let Some(line) = lock_line(status, prefers_chinese()) {
         println!("  {line}");
     }
-    if let Some(line) = signing_line(&target.instance.state_dir, now_secs(), prefers_chinese()) {
+    if let Some(line) = signing_line(&target.instance.state_dir, core::clock::unix_now(), prefers_chinese()) {
         println!("  {line}");
     }
 }
@@ -584,10 +584,6 @@ fn signing_line(state_dir: &std::path::Path, now: u64, chinese: bool) -> Option<
         (false, true) => format!("Phone Use 签名 {days} 天后到期：每晚任务会自动重签，也可以现在运行 iphone-use setup-app"),
         (false, false) => format!("Phone Use signing expires in {days} days: the nightly job re-signs it, or run iphone-use setup-app now"),
     })
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[cfg(test)]

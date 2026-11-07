@@ -350,6 +350,7 @@ mod tests {
         }
     }
     use super::*;
+    use core::clock::unix_now;
 
     struct DropTestDir(std::path::PathBuf);
     impl Drop for DropTestDir {
@@ -402,10 +403,6 @@ mod tests {
         assert!(!pairing.redeem(code));
         assert!(file.exists());
         assert!(!pairing.redeem(code));
-    }
-
-    fn unix_now() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
     }
 
     #[test]

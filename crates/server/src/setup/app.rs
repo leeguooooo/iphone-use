@@ -230,9 +230,9 @@ pub const SIGNING_FILE: &str = "app-signing.json";
 /// missing is better than one that is wrong.
 fn record_signing(state_dir: &Path, bundle: &str, app: &Path) {
     let Some(expires_at) = profile_expiry(&app.join("embedded.mobileprovision")) else { return };
-    let note = serde_json::json!({ "bundle": bundle, "expires_at": expires_at, "installed_at": now_secs() });
+    let note = serde_json::json!({ "bundle": bundle, "expires_at": expires_at, "installed_at": core::clock::unix_now() });
     if std::fs::write(state_dir.join(SIGNING_FILE), note.to_string()).is_ok() {
-        let days = expires_at.saturating_sub(now_secs()) / 86_400;
+        let days = expires_at.saturating_sub(core::clock::unix_now()) / 86_400;
         term::ok(&format!("Signing valid for {days} more days; the nightly job re-signs it in its last 21"));
     }
 }
@@ -623,8 +623,4 @@ mod tests {
         assert!(parse(&["--remote-only".into()]).unwrap().remote_only);
         assert!(parse(&["--bogus".into()]).is_err());
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

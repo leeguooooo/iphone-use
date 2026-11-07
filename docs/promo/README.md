@@ -1,5 +1,7 @@
 # iphone-use promo video
 
+> Historical: the film was recorded with v0.17.14 on 2026-10-10 and these sources are not updated for later builds.
+
 A 55-second film rendered with [motion-use](https://github.com/leeguooooo/motion-use) ≥ 0.5: Chinese and English, 1920×1080 and 1080×1920, narrated, with subtitles timed from the narration.
 
 ```bash

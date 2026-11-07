@@ -1,5 +1,7 @@
 # Search and AI discovery
 
+> Historical: working notes from 2026-10-07, kept for the record and not maintained.
+
 Canonical product page: [English](https://blog.leeguoo.com/en/posts/iphone-use/) and [中文](https://blog.leeguoo.com/zh/posts/iphone-use/).
 Source: `docs/website.en.html` and `docs/website.html`. Publish both with `blog-publish update --dry-run` first, then `blog-publish update`; download and read the public pages after publication. Back up both JSON metadata and HTML before editing. HTML is the stored body; a JSON export alone can omit it.
 

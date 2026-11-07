@@ -467,9 +467,12 @@ final class RunnerTests: XCTestCase {
   // MARK: - /source
 
   func source(_ request: HTTPRequest) throws -> HTTPResponse {
+    // Query limits are clamped to the defaults (64 levels / 5000 nodes), the same caps the
+    // element-subtree route enforces: a larger ask walks the whole AX tree of a long list and
+    // has killed the runner before.
     let explicitDepth = request.query["max_depth"].flatMap { Int($0) }
-    let maxDepth = max(1, explicitDepth ?? Self.defaultMaxDepth)
-    let maxNodes = max(1, request.query["max_nodes"].flatMap { Int($0) } ?? Self.defaultMaxNodes)
+    let maxDepth = min(Self.defaultMaxDepth, max(1, explicitDepth ?? Self.defaultMaxDepth))
+    let maxNodes = min(Self.defaultMaxNodes, max(1, request.query["max_nodes"].flatMap { Int($0) } ?? Self.defaultMaxNodes))
     // An explicit depth is honoured as asked: no frontier re-rooting past it.
     let extensionCalls = request.query["extension_calls"].flatMap { Int($0) }
       ?? (explicitDepth == nil ? Self.defaultExtensionCalls : 0)

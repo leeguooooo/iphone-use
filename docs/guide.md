@@ -566,12 +566,13 @@ its daemon requests automatically.
 
 | Group | Tools |
 |---|---|
-| See | `phone_status`, `phone_capabilities` (what this build supports vs what is possible right now; wakes nothing), `phone_screenshot`, `phone_elements` (carries a `registry` block naming installed flows for the app on screen) |
+| See | `phone_status`, `phone_capabilities` (what this build supports vs what is possible right now; wakes nothing), `phone_screenshot`, `phone_elements` (carries a `registry` block naming installed flows for the app on screen), `phone_read_value` (one element's full AX value without tapping or taking a lease, for `value_truncated` rows), `phone_subtree` (one element's bounded subtree, read only), `phone_scroll_find` (find one exact label, swiping at most `max_swipes` times), `phone_collect_list` (read a scrolling list across pages in one call), `phone_screen` (the live screen panel beside the chat, in hosts that render MCP Apps; `phone_screen_frame` is its hidden frame transport), `phone_instances` (installed local phone instances and their read-only status; pass `instance` on any call to choose one), `phone_apps` (an app's bundle id by name instead of guessing), `phone_home_layout` (every Home Screen page, Dock, folder and widget stack without opening anything; `backup`/`preview`/`apply`/`restore` write it) |
 | Act | `phone_tap`, `phone_tap_element` (snapshot-bound), `phone_tap_label` (unique exact label), `phone_scroll`, `phone_type` (CJK-clean), `phone_key`, `phone_shortcut` (`home`/`spotlight`) — each takes an optional `observe` |
 | Batch | `phone_run_steps` — up to 24 steps incl. `tap_locator`, `launch_app`, `picker`, `alert`, `perform` (toggle a switch, adjust a slider), long-press/swipe/drag, `wait_for`; `phone_jev_run` — hand a whole goal to the fast on-phone agent |
 | Lifecycle | `phone_reconnect` (restart the device runner on the configured phone, never a UDID switch), `phone_hold`, `phone_release_owner`, `phone_login` (sign an app in from the user's vault, inside the daemon) |
 | Flows | `phone_flow_list`, `phone_flow_info`, `phone_flow_run`, `phone_flow_draft`, `phone_flow_update`, `phone_flow_publish`, `phone_flow_report` |
-| Metrics | `phone_run_start`, `phone_run_end` (count one task's calls exactly) |
+| Metrics | `phone_run_start`, `phone_run_end` (count one task's calls exactly), `phone_run_trace` (the redacted action timeline of a run started with `trace=true`), `phone_metrics` (task performance aggregates for this client's owner) |
+| Device | `phone_logs` (capture and read the phone's live system log), `phone_crashes` (list crash reports, or read one by `name`), `phone_record` (screen recording to an MP4 on the Mac: start, do the task, stop), `phone_install_app` (install an `.ipa`/`.app` from the Mac or an https `.ipa` link), `phone_set_location` (simulated GPS for location-aware apps), `phone_app_notes` (read or replace the persistent notes for one bundle id about navigation and quirks) |
 
 `phone_elements` normally summarizes off-screen/not-drawn rows with up to five
 labels. Set `include_hidden: true` to see those rows individually, with their
@@ -589,7 +590,7 @@ Send paths through `/agent/input`, `/agent/actions`, or MCP/Flow; the browser `/
 Waypoint paths require 80–2000 ms travel per segment and at most 2000 ms initial hold. The four-coordinate form accepts 1–10000 ms travel and up to 10000 ms hold; the Runner clamps these to 80–2000 ms travel and at most 2000 ms hold. Rebuild the Runner before using paths; older runners return `runner_upgrade_required` without sending a gesture. A failed capability read returns `runner_capability_unavailable` instead; check connectivity before trying again. Flows containing `points` require an updated client and must stay out of the public Flow registry until that release is broadly available.
 
 
-Each of these 26 tools answers in two parts.
+Each of these 43 tools answers in two parts.
 
 * **The text block** is compact and written for the model. It holds the settled
   change after an act tool, one line per element, or a batch's verdict and end
@@ -605,7 +606,8 @@ Code shows it only `structuredContent` on a successful result, and Codex CLI
 shows it both parts.
 
 Three tools differ: `phone_status` and `phone_capabilities` return the JSON
-itself, and `phone_screenshot` returns an image.
+itself, and `phone_screenshot` returns an image. `phone_screen` opens a panel rather than
+answering the model, and `phone_screen_frame` only feeds that panel.
 
 When a result cannot be confirmed, `outcome: "unknown"` comes with
 `retry_safe: false`. Branch on the explicit `retry_safe` boolean, never on
@@ -621,6 +623,43 @@ empty or container-only tree, which is never called stable.
 
 Keyboard dismissal, uninstall, and target configuration stay HTTP-only. Full schemas:
 [`crates/mcp/README.md`](../crates/mcp/README.md).
+
+`IPHONE_USE_MCP_TOOLS` in the server's `env` narrows what the model sees: `all` (the
+default), `core` (everything except the six developer tools: `phone_logs`,
+`phone_crashes`, `phone_record`, `phone_install_app`, `phone_set_location`,
+`phone_app_notes`), `readonly` (only the tools annotated read-only, plus `phone_flow_draft`
+and `phone_home_layout`), or a comma list of tool names (`phone_screen` brings
+`phone_screen_frame` along). A hidden tool is neither listed nor callable; a call to one
+is refused with a message that names the setting, and nothing reaches the phone.
+
+### Multi-finger long press and Jev read recovery
+
+`phone_run_steps` and saved flows take `kind:"multi_longpress"`:
+
+```json
+{"kind":"multi_longpress","points":[{"x":0.3,"y":0.5},{"x":0.5,"y":0.5},{"x":0.7,"y":0.5}],"duration_ms":1500}
+```
+
+`points` holds 2–5 distinct normalized coordinates; the array length is the number of
+fingers. Over HTTP (`/agent/input`, `/agent/actions`) the step is `type:"multi_longpress"`.
+The duration defaults to 1000 ms (1–10000 ms). Every point is checked before anything is
+sent, and a failure never degrades to one finger; a plain `longpress` with `fingers:3` is
+refused. The protocol and batching are covered by automated tests; whether a given app
+recognises the gesture still needs a check on hardware.
+
+When Jev gets HTTP 504 `runner_source_timeout`, it waits the response's `retry_after_secs`
+(1–60 s) and retries the read once, so the server can answer with a bounded tree; it never
+replays the previous tap. If the read after an action still fails, Jev answers
+`status:"blocked"` with `history` and `last_successful_action` kept, so whoever takes over
+can verify where it stopped.
+
+On an `element_occluded` whose action is confirmed unsent, with the keyboard visible in the
+current read, Jev tries one `DISMISS_KEYBOARD` and reads again. That action uses its own
+`keyboard_dismiss_only` match: only an explicit "hide keyboard" button, never Done, Return
+or Search; with no such button it answers blocked. An older daemon refuses the separate
+action rather than ignoring the guard and pressing Search. It does not clear the search
+text, submit anything or bypass the occlusion check. The keyboard still up, or a second
+occlusion, is blocked; an unknown action outcome never enters this recovery path.
 
 ## Flows and the official flow registry
 
@@ -843,8 +882,8 @@ simulators.
 
 The preview doesn't cover these yet:
 
-- `IPHONE_USE_TARGET` isn't stored in an instance plist: the simulator instance runs
-  without launchd, so it doesn't come back after a reboot (run `simulator start` again).
+- The simulator instance runs without launchd, so it doesn't come back after a reboot
+  (run `simulator start` again).
 - Live H.264 video from the runner hasn't been verified on a simulator (MJPEG and
   recordings don't depend on it).
 - Simulators have no camera, App Store apps, real push notifications or Face ID (unless
@@ -999,36 +1038,109 @@ On install the app keeps a valid existing signature and repairs an invalid one w
 keychain-free ad-hoc signing; the daemon holds no macOS permission grant that a new
 signature could invalidate.
 
+### Command line
+
+Besides `setup`, `doctor`, `status`, `try`, `login`, `upgrade`, `remote` and `setup-app`,
+`iphone-use` has:
+
+| Command | What it does |
+|---|---|
+| `iphone-use files receive\|status\|stop\|result` | Receive a file the person explicitly saved to the runner's Files inbox (Save to Files on the phone); run `receive` after the save completes. Needs Xcode's CoreDevice tools. |
+| `iphone-use home-layout backup [file]`, `apply <file>`, `restore [file]` | Back up or replace the Home Screen layout (icon-state plist); `restore` with no file takes the newest automatic backup, every write backs up what it replaces first, `--dry-run` prints the preview only. Needs `IPHONE_USE_UDID`. |
+| `iphone-use metrics [--owner <id>] [--json]` | Per-run task metrics: HTTP calls (not model turns), batches, observed actions, failures and p50/p95. |
+| `iphone-use test <suite> …` | Run a YAML/JSON test suite on the phone (setup, then cases of steps and asserts); exit 0 passed, 1 a case failed, 2 the suite is invalid or the phone cannot be driven. The flags are `iphone-use-mcp test`'s; see [`testing.md`](testing.md). |
+| `iphone-use schedule add\|list\|runs\|run\|enable\|disable\|rm …` | Scheduled flows and test suites, the CLI for `/agent/schedules` ([reference](agent-reference.md#http-api)). |
+| `iphone-use device info\|ddi\|runner-status --udid <UDID> [--port 8100]` | Read the phone straight over usbmuxd: name and iOS, developer disk image state, or the runner's `/status` on its device port (exit 1 when nothing answers yet). |
+
+`metrics`, `test` and `schedule` take `--instance <name>` for a second phone (default:
+`IPHONE_USE_INSTANCE`).
+
 ### Configuration
 
 Earlier releases named these `PHONE_REMOTE_*`. Those names still work, in the
 environment and in an existing LaunchAgent plist; when both are set,
 `IPHONE_USE_*` wins, and the next `install.sh` run writes the new names.
+`IPHONE_USE_INTERNAL_TEST_*` variables are the test suite's and are not listed.
+
+**Daemon** (the LaunchAgent plist's `EnvironmentVariables`, or the environment of
+`iphone-use serve`):
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `IPHONE_USE_HOST` / `IPHONE_USE_PORT` | `127.0.0.1` / `44321` | Listen address and port (`0.0.0.0` for LAN; a password is then mandatory). |
+| `IPHONE_USE_BASE_PATH` | *(none)* | Serve the pages under a path prefix (`/lab`) so several daemons share one host; see [A second phone](#a-second-phone-named-instances). The API stays unprefixed. |
 | `IPHONE_USE_PASSWORD` | *(none)* | Browser login; doubles as the agent bearer only when no agent token is set. |
 | `IPHONE_USE_AGENT_TOKEN` | *(none)* | Dedicated agent bearer. When set, it is the **only** accepted bearer. |
+| `IPHONE_USE_SESSION_TTL` | `28800` (8 h) | How long a browser session cookie lives. `0` or an invalid value falls back to the default; there is no "never ends". |
 | `IPHONE_USE_UDID` | detected and persisted by the installer | Canonical iPhone for the managed runner and destructive commands. Requests cannot switch it; change the deployment and restart. Pass the same value as `IPU_RUNNER_UDID` to setup. |
-| `IPHONE_USE_RUNNER_URL` / `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. |
+| `IPHONE_USE_BACKEND` | `direct` | Written by setup. `direct` drives the phone through the device runner and is the only backend; `mirror` (iPhone Mirroring, removed in v0.9) is refused with a warning and served over the runner. |
+| `IPHONE_USE_SIMULATOR` | *(unset)* | The simulator this daemon drives (preview; set by `simulator start`). Device services then go through `simctl`; see [Simulators](#simulators-preview). |
+| `IPHONE_USE_RUNNER_URL` / `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | Runner control and MJPEG loopbacks (any WebDriverAgent-compatible endpoint works). Control fails closed when unreachable. The installer requires both or neither for an external runner; it never mixes a remote control URL with a loopback video one. |
 | `IPHONE_USE_RUNNER_MANAGED` | on for loopback endpoints | Whether this daemon owns the runner supervisor/relay lifecycle. |
 | `IPHONE_USE_PREWARM` | on | `0` turns pre-warm off (see Lifecycle). `IPHONE_USE_PREWARM_RECENT_SECS` (default `3600`) is how recently an agent must have driven the phone; `IPHONE_USE_PREWARM_INTERVAL_SECS` (default `600`) limits each trigger. |
 | `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | Stop the runner and park its supervisor after this many idle seconds; the next agent request starts it again. `0` keeps the runner up, at the cost of a passcode prompt each time iOS kills it. |
 | `IPHONE_USE_IDLE_RELEASE` | *(unset)* | `force` releases idle runners even on a phone whose next start needs a person (a passcode phone, or one that cannot start over Wi-Fi); see `keep_runner_alive` in Lifecycle. |
 | `IPHONE_USE_KEEP_AWAKE_SECS` | `120` | Keep the phone from auto-locking while it is driven and for this many seconds after the last request (a hold, a live view or an owner lease also keep it awake). The runner presses F13, a key iOS ignores, every 10 s and never touches a locked phone. `0` turns it off. |
 | `IPHONE_USE_OWNER_LEASE_SECS` | `300` | How long an `X-Phone-Owner` lease lives without a refreshing request. |
+| `IPHONE_USE_AUTO_FOCUS` | on | `0` turns off the automatic Do Not Disturb: with the `focus_on`/`focus_off` intents installed, an agent session's first control request turns DND on (at a quiet moment, never over a Focus the person chose) and giving the phone back turns it off. |
+| `IPHONE_USE_SOURCE_MAX_NODES` | `1000` | Node count above which a tree read is kept "lite" (without `isVisible`). A daemon-side threshold only; the runner itself caps every read at 5000 nodes and 64 levels. |
+| `IPHONE_USE_IMAGE_BUDGET_BYTES` | `3500000` | Size cap for an `/agent/elements` answer that attaches a screenshot (the vision fallback for an unusable tree): the image is tried at 1200, 800 and 500 px until the whole JSON fits under a standard client's 4 MB read limit, so text is never pushed out by an image. |
+| `IPHONE_USE_H264_PASSTHROUGH` | on | `0` always re-encodes the runner's H.264 on the Mac instead of passing the phone's stream through. |
+| `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
+| `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
+| `IPHONE_USE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
+| `IPHONE_USE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
+| `IPHONE_USE_FLOWS_DIR` | `~/.iphone-use/flows` | The local flow store (mode 0700) the daemon, `iphone-use-mcp` and schedules share. |
+| `IPHONE_USE_FLOWS_REPO` | `leeguooooo/iphone-use-flows` | The registry (`owner/name`) that `flow publish` opens pull requests on and `flow report` files issues in (both through `gh`). |
+| `IPHONE_USE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
+| `IPHONE_USE_TELEMETRY` | off in this build | Anonymous usage telemetry sends nothing unless a project token is configured (`IPHONE_USE_TELEMETRY_TOKEN`); `0`/`false`/`off`/`no`, or `DO_NOT_TRACK=1`, keeps it off regardless. See [`telemetry.md`](telemetry.md). |
+| `IPHONE_USE_TAILNET_BIN` / `IPHONE_USE_CLOUDFLARED` | next to `iphone-use` / PATH, then Homebrew | The remote-access helpers (see Control from anywhere). Their settings are not environment variables but `~/.iphone-use/remote/remote.json`, written by `iphone-use remote`. |
+
+**Setup and the device runner** (`iphone-use setup`, `~/.iphone-use/setup-runner.sh`; the
+supervisor plist remembers what it needs for reconnects and upgrades):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IPU_RUNNER_UDID` | the one USB iPhone | Which phone to set up; required when several are plugged in. Same value as `IPHONE_USE_UDID`. |
+| `IPU_RUNNER_TEAM_ID` | Xcode's last-selected team | The Apple development team that signs the runner. Named instances inherit the default instance's. |
+| `IPU_RUNNER_BUNDLE_ID` | derived from the team id | The runner's bundle id. |
+| `IPU_RUNNER_ASC_KEY_PATH` / `IPU_RUNNER_ASC_KEY_ID` / `IPU_RUNNER_ASC_ISSUER_ID` | *(none)* | App Store Connect API key (absolute `.p8` path, key id, issuer id; all three) that signs without an Xcode account. Required for iOS 15/16 phones. |
+| `IPU_RUNNER_PORT` / `MJPEG_PORT` | `8100` / `9100` (named instances: derived) | The Mac-side relay ports for runner control and video; they must differ. |
+| `IPU_RUNNER_TRANSPORT` | `auto` | `auto`: off USB, reach the phone through CoreDevice's encrypted Wi-Fi tunnel (USB preferred); `usb` requires the cable. |
+| `IPU_RUNNER_ALLOW_LAN` | off | `1` adds the plain, unencrypted LAN relay to the phone's address; a trusted, isolated network only. It never changes which phone is picked. |
+| `IPU_RUNNER_EXIT_NOTICE` | `auto` | Whether the runner may show the on-phone exit notice: `auto` uses an existing notification permission only, `1` asks for it, `0` never. |
+| `IPU_RUNNER_KEEPALIVE` | set by the supervisor plist | `1` marks the launchd-run copy of the setup script that keeps the runner alive. Not meant to be set by hand. |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | Device runner sources setup builds (a repo checkout's `scripts/setup-runner.sh` uses its own `runner/`). Persisted only when not the default. |
 | `IPU_RUNNER_REBUILD` | off | `1` makes the next setup ignore the recorded runner product and build again. |
 | `IPU_EMBED` | on | `0` builds the device runner without the on-phone daemon. Persisted for the supervisor. |
 | `IPU_EMBED_LIB` | `~/.iphone-use/runner/embed/libipu_embed.a` | The on-phone daemon library setup links into the runner (absolute path). A repo checkout builds it with `scripts/build-ios-embed.sh`; none found builds the plain runner. Persisted for the supervisor. |
 | `IPU_DAEMON_HOST` | `127.0.0.1` | Where the daemon inside the runner listens on the phone; `0.0.0.0` lets other devices drive this phone through it (its token is still required). Persisted for the supervisor. |
-| `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` | runner default 64 | Applies to an external WebDriverAgent only; the device runner bounds its own tree reads (depth ladder, 5000 nodes). |
-| `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` | — | Same: WebDriverAgent only. |
-| `IPHONE_USE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
-| `IPHONE_USE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
-| `IPHONE_USE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
-| `IPHONE_USE_TAILNET_BIN` / `IPHONE_USE_CLOUDFLARED` | next to `iphone-use` / PATH, then Homebrew | The remote-access helpers (see Control from anywhere). Their settings are not environment variables but `~/.iphone-use/remote/remote.json`, written by `iphone-use remote`. |
+| `IPHONE_USE_XCODE` | the selected Xcode | This phone's own `Xcode.app` (`iphone-use setup --xcode`), for a phone whose iOS needs a different Xcode than the Mac's default. |
+| `IPHONE_USE_LEGACY_LAUNCH` | next to the binary, else the installed app | The `iphone-use-legacy-launch` helper that starts the runner on iOS 15/16. |
+| `IPHONE_USE_DDI_BASE_URL` | Apple's | An `https://` mirror for the iOS 15/16 developer disk images setup downloads. |
+| `IPHONE_USE_APP_SRC` | the release's `iphone-use-app.tar.gz` | A checkout to build the native iOS app from (`iphone-use setup-app`); see [Install the app](#install-the-app). |
+
+**Installer and upgrades** (`install.sh`, the nightly job):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IPHONE_USE_NO_SETUP` | off | `1` (or `--no-setup`) skips the phone step on a first install; upgrades never run it. |
+| `IPHONE_USE_SKIP_SKILL` | off | `1` leaves the agent skill untouched (a degraded install with no compatibility claim). |
+| `IPHONE_USE_AUTO_UPDATE` | on | `0` (or `--no-auto-update`) turns the nightly auto-update job off, persistently; see [Upgrade](#upgrade). |
+| `IPHONE_USE_AUTO_UPDATE_JOB` | set by `auto-update.sh` | `1` tells `install.sh` it runs under the nightly job (quiet, no browser). Not meant to be set by hand. |
+
+**MCP server and CLI** (the client's `env` for `iphone-use-mcp`, or the shell):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IPHONE_USE_URL` | read from the LaunchAgent | The daemon to talk to (`http://127.0.0.1:44321`; a named instance's port). |
+| `IPHONE_USE_TOKEN` | read from the LaunchAgent | The agent bearer (`IPHONE_USE_AGENT_TOKEN`'s value). |
+| `IPHONE_USE_INSTANCE` | `default` | Which daemon/phone pair the CLI and MCP server address (`--instance` on the CLI). |
+| `IPHONE_USE_OWNER` | `mcp-<pid>` | The `X-Phone-Owner` the MCP server and `flow run` send; the owner lease is per value. |
+| `IPHONE_USE_MCP_TOOLS` | `all` | Which tools the MCP server lists and accepts: `core` (no developer tools), `readonly`, or a comma list; see [MCP server](#mcp-server). |
+| `IPHONE_USE_MCP_STRUCTURED` | `slim` | `full` sends the daemon's whole JSON as `structuredContent`, `off` none. |
+| `IPHONE_USE_MCP_PREWARM` | off | `1` lets the MCP server ask the daemon to pre-warm the runner when it starts; off so that discovery and idle conversations never wake a phone. |
+| `IPHONE_USE_MCP_TOKEN` | *(none)* | With `iphone-use-mcp --listen`: the bearer HTTP clients must send; required off loopback. |
 
 ## Security
 
@@ -1159,6 +1271,22 @@ iPhone:
 5. `/agent/elements`, `/agent/screenshot`, `/agent/input` work through bearer auth, including with a failed runner endpoint; no command ever moves the Mac cursor.
 6. `releasing → released → reconnecting → ready` is observed, plus lock/unlock, USB reconnect, Mac restart, runner renew/reinstall, and no silent target change on a multi-device Mac.
 7. On an isolated network, record whether the phone's IP exposes unauthenticated `8100/9100`.
+
+## Other documents
+
+- [`agent-reference.md`](agent-reference.md) — the agent-facing reference (also served at
+  `/agent/reference`): states, HTTP API, actions, flows.
+- [`agent-task.md`](agent-task.md) — `/agent/task`: one goal handed to the daemon, on the
+  Mac or on the phone itself.
+- [`testing.md`](testing.md) — rerunnable test suites (`iphone-use test`).
+- [`telemetry.md`](telemetry.md) and [`privacy.md`](privacy.md) — what leaves the Mac, and how
+  to turn it off.
+- [`security/`](security/centralized-scan-review.md) — the 2026-10-17 plugin-catalog scan
+  review and the changes it led to.
+- Historical, kept for the record and not maintained:
+  [`measurements/`](measurements/agent-loop-ab-2026-10-07/README.md) (single calls vs one
+  batch, 2026-10-07), [`promo/`](promo/README.md) (the promo film, recorded with v0.17.14)
+  and [`discoverability/`](discoverability/README.md) (search and AI-discovery notes).
 
 ## Feedback
 

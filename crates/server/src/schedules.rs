@@ -610,12 +610,7 @@ pub struct Scheduler {
     attempt_lock: tokio::sync::Mutex<()>,
 }
 
-pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+pub use core::clock::unix_now;
 
 fn read_store(path: &Path) -> Store {
     match std::fs::read(path) {

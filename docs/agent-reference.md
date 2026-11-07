@@ -377,6 +377,19 @@ only on a trusted network.
 | `GET /agent/intents`, `POST /agent/intent` | Semantic intents ([below](#semantic-intents)) |
 | `POST /agent/mode`, `/agent/hold`, `/agent/owner`, `/agent/prewarm` | Reconnect / hold / release lease / pre-warm ([above](#phone-states-and-recovery)) |
 | `POST /agent/runner-handoff` | Setup's: after it verifies a new runner the daemon still reports down, the daemon drops its state from the previous runner and probes again; answers `{up, actionable, locked, retried, error}`. Agents never need it |
+| `GET /agent/mjpeg` | The live screen as MJPEG (`multipart/x-mixed-replace`, ~28 fps; the cap is the runner's capture rate, not USB vs Wi-Fi). Browser cookie or agent bearer; `?stream_id=` names the viewer, `?mode=performance` (default) or `quality`. A browser renders it in `<img src="/agent/mjpeg">`; models use `/agent/screenshot` |
+| `GET /agent/h264`, `POST /agent/h264/keyframe` | The same feed as H.264 (~10× less bandwidth; wire format in `crates/server/src/video.rs`), same auth, query and viewer accounting. `keyframe` (needs `X-Phone-Control: 1`) asks for a fresh entry point when a viewer's decoder dropped frames → `{ok}`; keyframes otherwise go only to new viewers and every ~10 s |
+| `GET /agent/flows` | The flows this daemon can run, registry and local: `?app=<bundle or name>`, `?category=` → the JSON `iphone-use-mcp flow list --json` prints. A store error answers `{ok:true, flows:[], note}` |
+| `POST /agent/flow/run` | `{"id":"app/flow", "inputs"?:{"k":"v"}, "confirm"?:bool}` → `{ok, result}`: runs the flow in this process as the caller's `X-Phone-Owner` (else `flow-run`). `confirm` is required for a flow that sends, pays or deletes. 400 `id_required`, 503 `not_ready` before the scheduler is up |
+| `GET /agent/flow/record`, `POST /agent/flow/record` | Record a flow from what is done on the phone. GET → `{ok, recording, steps, draft}`. `POST {"action":"start"\|"stop"}` → `{ok, recording}` (+ `draft` on stop): every step applied through `/control`, `/agent/input` or `/agent/actions` lands in the recording, a person's coordinate taps as the element under the finger |
+| `POST /agent/flow/save` | `{"id":"app/name", "name"?, "description"?, "flow"?:{…}}` → `{ok, saved}`: installs the flow into this daemon's local store, where schedules and tasks find it. Without `flow`, the running or last recording, else the current trail's draft, is saved (404 `no_trail`); 422 `invalid_flow`. Never publishes anywhere |
+| `POST /agent/task`, `GET /agent/task/<id>`, `POST /agent/task/<id>/<verb>`, `GET /agent/tasks` | A goal in plain words the daemon carries out by itself: `{"goal", "app"?, "app_fresh"?, "max_steps"?, "models"?, "confirm"?}` → 202 `{id, status}` (409 `task_running` while another runs). `GET` (`current` for the running or last task; `?since=n` for the steps after `n`) → `{id, goal, status, phase, planned_action, flow, steps, confirm, summary, error, …}`. Verbs: `confirm {"approve":bool}`, `cancel`, `pause`, `resume`. `tasks` → the last 20, newest first, without steps. Full shapes: [`agent-task.md`](agent-task.md) |
+| `GET /agent/schedules`, `POST /agent/schedules` | Scheduled flows and test suites. GET → `{ok, schedules:[{id, name?, cron, kind:"flow"\|"test", target, inputs, confirm_side_effects, webhook (host only), enabled, window_mins, created_at, next_run_at?, last_run}], mcp_available}`. POST (`X-Phone-Control: 1`) `{cron, kind, target, inputs?, confirm_side_effects?, webhook?, name?, window_mins?, enabled?}` → 201 `{ok, schedule}`; `target` is a registry id or an absolute flow file, a test target an absolute suite path. 400 `invalid_cron`/`invalid_target`, 503 `mcp_unavailable` |
+| `PATCH /agent/schedules/<id>`, `DELETE /agent/schedules/<id>` | `PATCH {"enabled": bool}` → `{ok, schedule}`; `DELETE` → `{ok, deleted}`. 404 `no_such_schedule` |
+| `POST /agent/schedules/<id>/run` | Queue a run now → 202 `{ok, run}`; 409 while a run of that schedule is still open |
+| `GET /agent/schedules/<id>/runs`, `GET /agent/schedules/runs` | `{ok, runs:[{id, schedule_id, scheduled_for, deadline, state, manual, attempts, next_attempt_at?, reason?, started_at?, finished_at?, duration_ms?, exit_code?, summary?, error?, artifacts?}]}`, newest first; `state` is `pending`, `postponed`, `waiting_unlock`, `running`, `passed`, `failed`, `missed` or `skipped`. 404 `no_such_schedule` |
+| `POST /agent/login-link` | → `{ok, url, lan_url, remote_url, expires_in_secs}`: one-time sign-in links for the installer and `iphone-use login`. `url` signs this Mac's browser in (loopback), `lan_url` is the scan-to-connect page a phone on the LAN reaches (`null` on a loopback-only daemon), `remote_url` the same through the tunnel. Each carries its own single-use code; the password is never part of a URL |
+| `POST /agent/phone-daemon/pair` | → `{ok, link, port, expires_in_secs, svg}`: a one-time link and QR code that pair the iPhone app with the daemon running inside this phone's runner ([`agent-task.md`](agent-task.md#the-phones-own-daemon-credentials)). 503 `no_runner`/`runner_unreachable`/`runner_busy`, 409 `runner_too_old` |
 
 Every state-changing POST needs `X-Phone-Control: 1`; a 403 names the missing
 header — fix the request once, do not repeat it. Give your client **at least
@@ -1020,11 +1033,11 @@ worked example below.
 
 ## MCP specifics
 
-42 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_read_value`, `phone_reconnect`, `phone_hold`,
+43 tools (one, `phone_screen_frame`, is hidden from the model and used only by the live screen panel): `phone_status`, `phone_screen`, `phone_capabilities`, `phone_read_value`, `phone_reconnect`, `phone_hold`,
 `phone_release_owner`, `phone_login`, `phone_apps`, `phone_screenshot`, `phone_elements`, `phone_home_layout`, `phone_instances`, `phone_tap`,
 `phone_tap_element`, `phone_tap_label`, `phone_scroll`, `phone_scroll_find`, `phone_collect_list`, `phone_type`,
 `phone_key`, `phone_shortcut`, `phone_run_steps`, `phone_jev_run`,
-`phone_run_start`, `phone_run_end`, `phone_run_trace`, `phone_subtree`, `phone_flow_list / info / run / draft /
+`phone_run_start`, `phone_run_end`, `phone_run_trace`, `phone_metrics`, `phone_subtree`, `phone_flow_list / info / run / draft /
 update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
 `phone_set_location`, `phone_record`, `phone_install_app`, `phone_app_notes`.
 

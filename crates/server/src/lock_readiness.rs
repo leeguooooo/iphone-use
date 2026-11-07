@@ -250,13 +250,6 @@ fn facts() -> Facts {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
-}
-
 /// Fold a passcode reading into what is known.
 ///
 /// Both sources answer "is a passcode required right now" rather than "is
@@ -294,7 +287,7 @@ fn update(passcode: Option<bool>, locked: Option<bool>, auto_lock: Option<AutoLo
         if auto_lock.is_some() {
             facts.auto_lock = auto_lock;
         }
-        facts.checked_at = Some(now_secs());
+        facts.checked_at = Some(core::clock::unix_now());
         (
             before.passcode != facts.passcode || before.auto_lock != facts.auto_lock,
             *facts,
