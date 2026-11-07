@@ -2701,7 +2701,7 @@ async function fetchStill(generation = stillsGeneration) {
   stillsAbortController = controller;
   const timeout = setTimeout(() => controller.abort(), STILL_REQUEST_TIMEOUT_MS);
   try {
-    const size = STREAMS_BUFFERED ? '&max_side=1000' : '';
+    const size = STREAMS_BUFFERED ? '&max_side=800' : '';
     const r = await fetch(BASE + '/agent/screenshot?t=' + Date.now() + size, {
       cache: 'no-store',
       signal: controller.signal,

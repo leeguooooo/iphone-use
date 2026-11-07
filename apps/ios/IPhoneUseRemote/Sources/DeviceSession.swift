@@ -637,7 +637,7 @@ final class DeviceSession: ObservableObject, Identifiable {
                 stillsTask = Task { [weak self] in
                     while !Task.isCancelled {
                         guard let self, let client = self.client, client.streamsBuffered else { return }
-                        if let (data, _) = try? await client.screenshot(maxSide: 1000),
+                        if let (data, _) = try? await client.screenshot(maxSide: 800),
                            let image = UIImage(data: data), !Task.isCancelled {
                             self.mjpegImage = image
                             self.frameArrived()

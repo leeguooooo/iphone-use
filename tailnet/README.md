@@ -77,3 +77,11 @@ approve the machine, enable HTTPS certificates or MagicDNS, or turn on
 VERSION=0.29.0 tailnet/build.sh        # -> tailnet/dist/iphone-use-tailnet (arm64 + x86_64)
 cd tailnet && go vet ./... && go test ./...
 ```
+
+## Tests
+
+`go test ./...` covers the header, access and status logic. `go test -tags integration
+./...` runs the real binary on a private tailnet (Tailscale's in-process test control
+server and DERP, no network beyond loopback): the owner's own device is proxied with
+our forwarding headers and an unbuffered stream, another user gets 403, and
+`--allow-tailnet-members` lets them in.

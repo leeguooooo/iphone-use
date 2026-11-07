@@ -173,7 +173,7 @@ jobs:
 
       - name: Build the Tailscale helper (universal)
         run: |
-          (cd tailnet && go vet ./... && go test ./...)
+          (cd tailnet && go vet ./... && go test ./... && go test -tags integration -count=1 ./...)
           VERSION="${{ github.ref_name }}" OUT="$GITHUB_WORKSPACE/target/release/iphone-use-tailnet" bash tailnet/build.sh
           test "$(lipo -archs target/release/iphone-use-tailnet)" = "x86_64 arm64" \
             || test "$(lipo -archs target/release/iphone-use-tailnet)" = "arm64 x86_64"

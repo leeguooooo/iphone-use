@@ -174,7 +174,7 @@ iphone-use remote cloudflare on                     # quick tunnel，不用账�
 iphone-use remote cloudflare on --token-file token.txt --url https://phone.example.com
 ```
 
-不带 token 时开的是 quick tunnel：随机的 `https://….trycloudflare.com` 地址，daemon 每次重启都会变。Cloudflare 在 quick tunnel 上会把流式响应攒到结束才发，所以那里的实时画面是一张张截图（每秒两三张），点击、输入和 agent 照常可用。要实时视频就用 named tunnel：在 Cloudflare Zero Trust › Networks › Tunnels 新建一条，把一个公网域名指向 `http://localhost:44321`，把 token 存进文件，两个参数一起传。named tunnel 的域名前面加 Cloudflare Access 只适合浏览器使用：App 和 agent 过不了 Access 登录。
+不带 token 时开的是 quick tunnel：随机的 `https://….trycloudflare.com` 地址，daemon 每次重启都会变。Cloudflare 在 quick tunnel 上会把流式响应攒到结束才发，所以那里的实时画面是一张张截图（每秒约两张），点击、输入和 agent 照常可用。要实时视频就用 named tunnel：在 Cloudflare Zero Trust › Networks › Tunnels 新建一条，把一个公网域名指向 `http://localhost:44321`，把 token 存进文件，两个参数一起传。named tunnel 的域名前面加 Cloudflare Access 只适合浏览器使用：App 和 agent 过不了 Access 登录。
 
 之后：
 

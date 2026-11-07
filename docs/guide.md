@@ -377,7 +377,7 @@ iphone-use remote cloudflare on --token-file token.txt --url https://phone.examp
 
 Without a token it opens a quick tunnel: a random `https://….trycloudflare.com`
 address that changes whenever the daemon restarts. Cloudflare holds streamed responses
-on quick tunnels until they end, so the live view there is a series of stills (about 2–3
+on quick tunnels until they end, so the live view there is a series of stills (about 2
 per second) and taps, typing and agents work as usual. For live video use a named tunnel:
 create one in Cloudflare Zero Trust › Networks › Tunnels, route a public hostname to
 `http://localhost:44321`, save its token in a file and pass both. Put Cloudflare Access in
