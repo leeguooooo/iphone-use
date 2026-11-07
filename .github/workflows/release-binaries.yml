@@ -162,6 +162,23 @@ jobs:
           test "$(lipo -archs target/universal-apple-darwin/release/iphone-use-legacy-launch)" = "x86_64 arm64" \
             || test "$(lipo -archs target/universal-apple-darwin/release/iphone-use-legacy-launch)" = "arm64 x86_64"
 
+      # ── Tailscale helper (Go, tsnet) ─────────────────────────────────────────
+      # `iphone-use remote tailscale on` runs it next to the daemon; see
+      # tailnet/README.md. Pure Go (CGO_ENABLED=0), so both slices build here.
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tailnet/go.mod
+          cache-dependency-path: tailnet/go.sum
+
+      - name: Build the Tailscale helper (universal)
+        run: |
+          (cd tailnet && go vet ./... && go test ./...)
+          VERSION="${{ github.ref_name }}" OUT="$GITHUB_WORKSPACE/target/release/iphone-use-tailnet" bash tailnet/build.sh
+          test "$(lipo -archs target/release/iphone-use-tailnet)" = "x86_64 arm64" \
+            || test "$(lipo -archs target/release/iphone-use-tailnet)" = "arm64 x86_64"
+          target/release/iphone-use-tailnet --version
+
       # Expose universal binary where make-app.sh expects it
       - name: Copy universal binary to target/release
         run: |
@@ -187,6 +204,13 @@ jobs:
           set -e
           test "$code" = 2
           grep -q "missing command" launcher.err
+
+      # `iphone-use remote tailscale on` finds the helper next to iphone-use.
+      - name: Verify the bundled Tailscale helper
+        run: |
+          helper=iPhoneUse.app/Contents/MacOS/iphone-use-tailnet
+          test -x "$helper"
+          "$helper" --version | grep -q "iphone-use-tailnet ${GITHUB_REF_NAME}"
 
       - name: Verify bundled MCP protocol and multi-step tool
         shell: bash

@@ -2535,6 +2535,11 @@ const MJPEG_FRAME_FRESH_MS = 8000;
 // Screenshot fallback refreshes every 2.5s. Three missed refreshes are enough
 // to treat its retained image as historical rather than safe control context.
 const STILL_FRAME_FRESH_MS = 8000;
+// Cloudflare quick tunnels (*.trycloudflare.com) hold a streamed response
+// until it ends, so the H.264/MJPEG stream never arrives there: skip it and
+// poll stills quickly instead (see crates/server/src/remote.rs).
+const STREAMS_BUFFERED = /\.trycloudflare\.com$/i.test(location.hostname);
+const STILL_POLL_MS = STREAMS_BUFFERED ? 400 : 2500;
 const STILL_REQUEST_TIMEOUT_MS = 7000;
 let directFeedActive = false;
 let stillsTimer = null, stillsStartTimer = null;
@@ -2696,7 +2701,8 @@ async function fetchStill(generation = stillsGeneration) {
   stillsAbortController = controller;
   const timeout = setTimeout(() => controller.abort(), STILL_REQUEST_TIMEOUT_MS);
   try {
-    const r = await fetch(BASE + '/agent/screenshot?t=' + Date.now(), {
+    const size = STREAMS_BUFFERED ? '&max_side=1000' : '';
+    const r = await fetch(BASE + '/agent/screenshot?t=' + Date.now() + size, {
       cache: 'no-store',
       signal: controller.signal,
     });
@@ -2743,7 +2749,7 @@ function startSnapshotFallback(generation) {
   ) return;
   if (!stillsTimer) {
     void fetchStill(generation);
-    stillsTimer = setInterval(() => void fetchStill(generation), 2500);
+    stillsTimer = setInterval(() => void fetchStill(generation), STILL_POLL_MS);
   }
 }
 function stopSnapshotPolling() {
@@ -3073,6 +3079,10 @@ function startMjpegAttempt(generation) {
     !directFeedActive ||
     backendStatus?.mode !== 'agent'
   ) return;
+  if (STREAMS_BUFFERED) {
+    startSnapshotFallback(generation);
+    return;
+  }
   clearMjpegAttempt();
   stopH264Stream();
   mjpegFrame.classList.remove('active');

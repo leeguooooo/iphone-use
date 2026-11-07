@@ -340,6 +340,63 @@ depends on the team:
 `xcodegen`, `scripts/build-browser-session.sh device` and the launcher library built by
 `experiments/phone-self-host/launcher/build.sh`; see `apps/ios/README.md`).
 
+## Control from anywhere (Tailscale / Cloudflare Tunnel)
+
+The daemon listens on this Mac. To control the phone from another network (cellular,
+office, a hotel), let the daemon run a tunnel for you. Both keep working across
+reinstalls and upgrades, and both still ask for the daemon's password.
+
+**Tailscale** (recommended: private, end-to-end encrypted, full video):
+
+```bash
+iphone-use remote tailscale on        # first time: open the sign-in link it prints
+```
+
+iphone-use joins your tailnet as its own device, `iphone-use` (`iphone-use-<instance>`
+for a second phone), the way Rex does: a bundled helper (`iphone-use-tailnet`, built on
+Tailscale's `tsnet`) runs next to the daemon, so the Tailscale app on this Mac is not
+needed. From any device signed in to your Tailscale, open
+`https://iphone-use.<tailnet>.ts.net` in a browser or the Phone Use Remote app, or
+`http://<tailnet IP>:44321`. Only devices of the Tailscale account that owns the node
+get through; `--allow-tailnet-members` lets the rest of the tailnet in (they still need
+the password). Other options: `--hostname NAME`, `--auth-key-file FILE` (enrol with a
+one-time key instead of the link; never on the command line), `--control-url URL`
+(Headscale). `off` stops serving and keeps the login, `login` prints a fresh link,
+`logout` signs the node out, `rename NAME` renames it.
+
+The HTTPS address needs **HTTPS certificates** turned on for the tailnet (Tailscale admin
+console › DNS); without it only the plain address works, and the browser falls back to
+MJPEG there because WebCodecs needs a secure page.
+
+**Cloudflare Tunnel** (no Tailscale on the other device; needs `brew install cloudflared`):
+
+```bash
+iphone-use remote cloudflare on                     # quick tunnel, no account
+iphone-use remote cloudflare on --token-file token.txt --url https://phone.example.com
+```
+
+Without a token it opens a quick tunnel: a random `https://….trycloudflare.com`
+address that changes whenever the daemon restarts. Cloudflare holds streamed responses
+on quick tunnels until they end, so the live view there is a series of stills (about 2–3
+per second) and taps, typing and agents work as usual. For live video use a named tunnel:
+create one in Cloudflare Zero Trust › Networks › Tunnels, route a public hostname to
+`http://localhost:44321`, save its token in a file and pass both. Put Cloudflare Access in
+front of a named tunnel's hostname only for browser use: the app and agents cannot pass
+an Access login.
+
+Then:
+
+- `iphone-use remote status` shows what is on and the addresses (`--json` for scripts);
+  `/agent/status` carries the same as `remote`.
+- `iphone-use remote pair` prints a one-time QR code and link for that address: scan
+  it with the phone or computer you will control from. The **Scan** button on the web
+  page lists the remote address first as well.
+- Agents and MCP clients on another computer: `IPHONE_USE_URL=<address>
+  IPHONE_USE_TOKEN=<daemon password or agent token>`.
+- Remote access is refused while the daemon has no password. The helpers' logs are in
+  `~/.iphone-use/remote/` (`tailnet.log`, `cloudflared.log`); the Tailscale helper
+  does not upload logs to Tailscale.
+
 ## Agent API
 
 Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
@@ -971,6 +1028,7 @@ environment and in an existing LaunchAgent plist; when both are set,
 | `IPHONE_USE_ELEMENTS_AFFORDANCES` | off | `1` adds sparse `actions`, `selected`, `min`/`max` to `/agent/elements` rows. |
 | `IPHONE_USE_ELEMENTS_TRAITS` | off | `1` also emits raw accessibility trait names. |
 | `IPHONE_USE_NO_UPDATE_CHECK` | off | Skip the daily release check. |
+| `IPHONE_USE_TAILNET_BIN` / `IPHONE_USE_CLOUDFLARED` | next to `iphone-use` / PATH, then Homebrew | The remote-access helpers (see Control from anywhere). Their settings are not environment variables but `~/.iphone-use/remote/remote.json`, written by `iphone-use remote`. |
 
 ## Security
 
@@ -988,10 +1046,12 @@ credentials.
   Mac; the iOS 15/16 LAN relay and `IPU_RUNNER_ALLOW_LAN=1` are plain HTTP, so screenshots,
   element trees and video are readable by anyone who can see that Wi-Fi traffic. Anyone
   who can read your user's files on the Mac can read the token.
-- From outside the LAN, reach `44321` through an authenticated HTTPS reverse proxy or a
-  trusted VPN/tunnel (Tailscale, for example) — never by exposing the runner's ports. The daemon
-  serves plain HTTP, honours `X-Forwarded-Proto`, and sets an `HttpOnly` +
-  `SameSite=Lax` session cookie.
+- From outside the LAN, use `iphone-use remote` ([Control from anywhere](#control-from-anywhere-tailscale--cloudflare-tunnel))
+  or your own authenticated HTTPS reverse proxy or VPN — never expose the runner's ports.
+  The daemon serves plain HTTP, honours `X-Forwarded-Proto`, and sets an `HttpOnly` +
+  `SameSite=Lax` session cookie (`Secure` behind HTTPS). A quick tunnel's address is
+  public: anyone who learns it reaches the login page, so keep the password strong and
+  turn the tunnel off when you do not need it (`iphone-use remote cloudflare off`).
 - The owner lease (`X-Phone-Owner`) is coordination between cooperating sessions, not a
   security boundary.
 - Do not leave payment apps, private chats, or 2FA screens open while exposing access.

@@ -59,6 +59,43 @@ impl Target {
         self.base.clone()
     }
 
+    /// The daemon's password is set (remote access refuses an open daemon).
+    pub fn has_password(&self) -> bool {
+        std::env::var("IPHONE_USE_PASSWORD")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| plist_env(&self.instance.daemon_label, "IPHONE_USE_PASSWORD"))
+            .is_some_and(|v| !v.trim().is_empty())
+    }
+
+    /// The port the daemon listens on.
+    pub fn port(&self) -> u16 {
+        self.base
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim_end_matches('/').parse().ok())
+            .unwrap_or(DEFAULT_PORT)
+    }
+
+    /// `POST /agent/login-link`: one-time sign-in links (see the daemon).
+    pub fn login_link(&self) -> Result<Value> {
+        let daemon = Daemon::new(self)?;
+        let (code, link) = daemon.call(reqwest::Method::POST, "/agent/login-link", None)?;
+        if code != 200 {
+            bail!("the daemon could not make a sign-in link (HTTP {code})");
+        }
+        Ok(link)
+    }
+
+    /// `GET /agent/status`, or None when the daemon does not answer.
+    pub fn daemon_status(&self) -> Option<Value> {
+        let daemon = Daemon::new(self).ok()?;
+        match daemon.call(reqwest::Method::GET, "/agent/status", None) {
+            Ok((200, status)) => Some(status),
+            _ => None,
+        }
+    }
+
     fn setup_script(&self) -> std::path::PathBuf {
         self.instance.state_dir.join("setup-runner.sh")
     }
@@ -746,6 +783,14 @@ pub fn run_login(target: &Target, open: bool) -> Result<i32> {
             println!("{qr}");
         }
     }
+    if let Some(remote_url) = link["remote_url"].as_str() {
+        println!("\nFrom another network (Tailscale / Cloudflare Tunnel), open this one-time link ({minutes} min, one use):\n  {remote_url}");
+        if link["lan_url"].is_null() {
+            if let Some(qr) = terminal_qr(remote_url) {
+                println!("\n{qr}");
+            }
+        }
+    }
     Ok(0)
 }
 
@@ -756,7 +801,7 @@ fn can_open_browser() -> bool {
         && std::path::Path::new("/usr/bin/open").exists()
 }
 
-fn terminal_qr(text: &str) -> Option<String> {
+pub fn terminal_qr(text: &str) -> Option<String> {
     let code = qrcode::QrCode::with_error_correction_level(text, qrcode::EcLevel::L).ok()?;
     Some(
         code.render::<qrcode::render::unicode::Dense1x2>()

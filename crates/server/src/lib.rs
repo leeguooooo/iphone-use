@@ -40,6 +40,7 @@ pub mod protocol;
 pub mod recording;
 pub mod redaction;
 pub mod relay_client;
+pub mod remote;
 pub mod runner_token;
 pub mod runtime_dir;
 pub mod schedules;

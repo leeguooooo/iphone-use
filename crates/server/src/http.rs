@@ -844,6 +844,24 @@ pub type ElementSnapshotCache =
     std::collections::VecDeque<(String, Arc<Vec<crate::runner::ElementRow>>)>;
 
 impl AppState {
+    /// Remote access through Tailscale / Cloudflare Tunnel (see `remote`).
+    pub fn remote_status(&self) -> serde_json::Value {
+        crate::remote::status(
+            &crate::instance::current().state_dir,
+            self.password.is_some(),
+            self.pairing.port.unwrap_or(crate::config::DEFAULT_PORT),
+        )
+    }
+
+    /// The URLs a phone or browser on another network can use right now.
+    pub fn remote_urls(&self) -> Vec<String> {
+        crate::remote::public_urls(
+            &crate::instance::current().state_dir,
+            self.password.is_some(),
+            self.pairing.port.unwrap_or(crate::config::DEFAULT_PORT),
+        )
+    }
+
     fn release_owner_lease(&self) {
         let mut traces = recover(self.action_traces.lock());
         let mut owner = recover(self.owner.lock());
@@ -1600,7 +1618,11 @@ async fn pair_new(
     if !has_phone_control_header(&headers) {
         return missing_phone_control_header_response();
     }
-    if !state.pairing.lan_reachable {
+    let remote_urls = state.remote_urls();
+    let https = request_is_https(&state, &headers);
+    // A daemon on 127.0.0.1 is still reachable through a tunnel: the request
+    // itself came in over one (forwarded https), or a helper is running.
+    if !state.pairing.lan_reachable && remote_urls.is_empty() && !https {
         return pair_json(
             StatusCode::CONFLICT,
             serde_json::json!({
@@ -1615,15 +1637,26 @@ async fn pair_new(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let (request_host, request_port) = crate::pairing::split_host(host_header);
-    let https = request_is_https(&state, &headers);
     let mut hosts: Vec<String> = Vec::new();
     if !request_host.is_empty() && !crate::pairing::is_loopback_host(&request_host) {
         hosts.push(request_host.clone());
     }
-    for (_, ip) in crate::pairing::lan_addresses() {
-        let ip = ip.to_string();
-        if !hosts.contains(&ip) {
-            hosts.push(ip);
+    // Tailscale / Cloudflare addresses next: they work from any network.
+    let remote_origins: Vec<(String, String)> = remote_urls
+        .iter()
+        .filter_map(|url| crate::pairing::origin_host(url).map(|h| (h, url.clone())))
+        .collect();
+    for (host, _) in &remote_origins {
+        if !hosts.contains(host) {
+            hosts.push(host.clone());
+        }
+    }
+    if state.pairing.lan_reachable {
+        for (_, ip) in crate::pairing::lan_addresses() {
+            let ip = ip.to_string();
+            if !hosts.contains(&ip) {
+                hosts.push(ip);
+            }
         }
     }
     let Some(default_host) = hosts.first().cloned() else {
@@ -1640,14 +1673,21 @@ async fn pair_new(
         .host
         .filter(|h| hosts.contains(h))
         .unwrap_or(default_host);
-    let scheme = if https { "https" } else { "http" };
-    // Keep the port the browser used; a tunnel's https URL has none.
-    let port = match request_port {
-        Some(p) => format!(":{p}"),
-        None => String::new(),
+    let origin = match remote_origins.iter().find(|(h, _)| *h == host) {
+        // A remote address keeps its own scheme and port.
+        Some((_, url)) if host != request_host => crate::pairing::origin(url),
+        _ => {
+            let scheme = if https { "https" } else { "http" };
+            // Keep the port the browser used; a tunnel's https URL has none.
+            let port = match request_port {
+                Some(p) => format!(":{p}"),
+                None => String::new(),
+            };
+            format!("{scheme}://{host}{port}")
+        }
     };
     let code = state.pairing.issue();
-    let url = format!("{scheme}://{host}{port}{}/pair?c={code}", state.base_path);
+    let url = format!("{origin}{}/pair?c={code}", state.base_path);
     pair_json(
         StatusCode::OK,
         serde_json::json!({
@@ -1704,12 +1744,22 @@ async fn agent_login_link(State(state): State<Arc<AppState>>, headers: HeaderMap
     } else {
         None
     };
+    // The same page through Tailscale / Cloudflare, for a phone elsewhere.
+    let remote_url = state.remote_urls().first().map(|url| {
+        format!(
+            "{}{}/pair?c={}",
+            crate::pairing::origin(url),
+            state.base_path,
+            state.pairing.issue()
+        )
+    });
     pair_json(
         StatusCode::OK,
         serde_json::json!({
             "ok": true,
             "url": url,
             "lan_url": lan_url,
+            "remote_url": remote_url,
             "expires_in_secs": crate::pairing::CODE_TTL.as_secs(),
         }),
     )
@@ -3129,10 +3179,11 @@ async fn agent_status(
     let agent_focus = recover(state.agent_focus.lock()).status_json();
     // The daemon inside the runner on the phone, as its last /status said.
     let phone_daemon = crate::phone_daemon::status_json(runner);
+    let remote = state.remote_status();
     let (status_owner, status_owner_remaining, status_owner_epoch) = owner_status_versioned(&state);
     let control_lease_json = control_lease_status(&state, status_owner.as_deref(), status_owner_epoch).to_string();
     let body = format!(
-        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"control_lease":{control_lease_json},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_retry":{setup_retry},"setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon}}}"#,
+        r#"{{"ok":true,"backend":"direct",{target_field}"instance":"{}","udid":{},"owner":{},"owner_lease_remaining_secs":{},"control_lease":{control_lease_json},"target_configured":{},"managed_runner":{},"managed_runner_pending":{},"recovery_owner":"{recovery_owner}","runner":{runner},"runner_actionable":{runner_actionable},"runner_locked":{runner_locked},"drivable":{drivable},"mode":"{mode}","device_state":"{device_state}","screen_state":"{screen_state}","releasing":{releasing},"reconnecting":{reconnecting},"warming":{warming},"released":{released},"human_handoff":{human_handoff},"ended_on_phone":{ended_on_phone},"runner_parked":{runner_parked},"runner_parked_reason":{runner_parked_reason_json},"hold_remaining_secs":{hold_remaining},"screen_private_secs":{screen_private_secs},"idle_secs":{idle_secs},"hint":{hint_json},"next_step":{next_step_json},"recovery":{recovery},"setup_blocked_on":"{setup_blocked_on}","setup_retry":{setup_retry},"setup_phase":{setup_phase_json},"setup_message":{setup_message_json},"runner_build":{runner_build},"runner_died_reason":"{runner_died_reason}","runner_died_at":{runner_died_at},"viewer_count":{viewer_count},"mjpeg_viewer_count":{mjpeg_viewer_count},"mjpeg_stream_fresh":{mjpeg_stream_fresh},"mjpeg_stream_age_ms":{mjpeg_stream_age_json},"capture_redacted":{capture_redacted},"version":"{version}","latest":{latest_json},"update_available":{update_available},"auto_update":{auto_update},"transport":"{transport}","runner_rtt_ms":{rtt_json},"transport_hint":{transport_hint},"wifi_start_refused":{wifi_start_refused},"keep_runner_alive":{keep_runner_alive},"legacy_ios":{legacy_ios},"lock_readiness":{lock_readiness},"device":{device},"agent_focus":{agent_focus},"phone_daemon":{phone_daemon},"remote":{remote}}}"#,
         crate::instance::current().name,
         serde_json::to_string(&status_udid).unwrap_or_else(|_| "null".into()),
         serde_json::to_string(&status_owner).unwrap_or_else(|_| "null".into()),
