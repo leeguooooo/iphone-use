@@ -5,13 +5,45 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      cargo:
+        patterns: ['*']
+        update-types: [minor, patch]
   - package-ecosystem: cargo
     directory: /experiments/phone-self-host/launcher
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      launcher-cargo:
+        patterns: ['*']
+        update-types: [minor, patch]
+  # The Tailscale helper (tsnet) next to the daemon.
+  - package-ecosystem: gomod
+    directory: /tailnet
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      gomod:
+        patterns: ['*']
+        update-types: [minor, patch]
+  # The Cloudflare Worker relay.
+  - package-ecosystem: npm
+    directory: /relay
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      npm:
+        patterns: ['*']
+        update-types: [minor, patch]

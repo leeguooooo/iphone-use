@@ -6,6 +6,13 @@ name: PR checks
 # binary.
 on:
   pull_request:
+    # Prose-only changes compile nothing. skills/** is deliberately NOT here:
+    # the helper step below asserts the skill directory holds exactly one
+    # file, and a PR adding a second one must still hit that gate.
+    paths-ignore:
+      - 'docs/**'
+      - 'site/**'
+      - '**/*.md'
   workflow_dispatch:
 
 concurrency:
@@ -57,6 +64,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: tailnet/go.mod
+          # setup-go has no restore-only mode, and every PR branch saving its
+          # own module cache evicts the ones worth keeping. Only main saves.
+          cache: ${{ github.ref == 'refs/heads/main' }}
           cache-dependency-path: tailnet/go.sum
       - name: vet, unit and private-tailnet end-to-end tests, universal build
         working-directory: tailnet
@@ -89,6 +99,13 @@ jobs:
 
     env:
       CARGO_TERM_COLOR: always
+      # Pinned, not stable: every new stable adds clippy lints, and -D warnings
+      # would then fail unrelated PRs on code nobody touched (1.97's
+      # chunks_exact/try_update lints did on the first run). Tests and clippy
+      # share this one toolchain so the workspace compiles once, and
+      # main-cache.yml warms the cache with the same version.
+      # TODO: bump this with the toolchain, fixing what the new lints find.
+      RUST_TOOLCHAIN: 1.96.0
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       # Nothing in this job may drive a phone or a Mirroring window: no device
       # is attached, and reaching for one would hang rather than fail. Point
@@ -100,13 +117,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master; explicit stable toolchain
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master; explicit pinned toolchain
         with:
-          toolchain: stable
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
 
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Same key as main-cache.yml so PRs restore the cache main saved.
+          # PR runs never save: each branch saving its own copy evicted the
+          # shared one, and a PR's dependencies are rarely different from
+          # main's.
+          shared-key: workspace-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `set -o pipefail` matters in every step below: a `cargo … | grep`
       # reports the grep's status, so a compilation failure can otherwise be
@@ -119,12 +144,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Pinned, not stable: every new stable adds lints, and -D warnings
-          # would then fail unrelated PRs on code nobody touched (1.97's
-          # chunks_exact/try_update lints did on the first run).
-          # TODO: bump this with the toolchain, fixing what the new lints find.
-          rustup toolchain install 1.96.0 --profile minimal --component clippy
-          cargo +1.96.0 clippy --workspace --locked -- -D warnings
+          cargo clippy --workspace --locked -- -D warnings
 
       - name: Native predicate literal semantics (no UI)
         run: swift scripts/test-predicate-literals.swift scripts/fixtures/predicate-literals.json
@@ -347,6 +367,7 @@ jobs:
           /bin/bash -n uninstall.sh
           /bin/bash -n scripts/setup-runner.sh
           bash scripts/test-install-release-transaction.sh
+          bash scripts/test-install-client-config.sh
           bash scripts/test-install-cli-link.sh
           bash scripts/test-install-runner-sources.sh
           bash scripts/test-install-named-swap.sh
@@ -357,6 +378,7 @@ jobs:
           bash scripts/test-uninstall-safety.sh
           bash scripts/test-setup-runner-shim.sh
           python3 scripts/test-auto-update.py
+          python3 -I scripts/test-agent-bench.py
           python3 scripts/test-instance-context.py
           # The nightly re-verification canary decides whether an installed
           # flow still works. Its verdict logic and its record-keeping are

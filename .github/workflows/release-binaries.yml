@@ -119,6 +119,14 @@ jobs:
 
       - name: Cache Rust build artefacts
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # The on-phone launcher is its own workspace with its own target dir.
+          workspaces: |
+            . -> target
+            experiments/phone-self-host/launcher -> target
+          # Tag builds are the only producer of release-profile artefacts, so
+          # they keep saving; a manual dry-run on a branch does not.
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
 
       # ── Build ────────────────────────────────────────────────────────────────
       # Build for both Apple Silicon and Intel; lipo them into a universal binary.

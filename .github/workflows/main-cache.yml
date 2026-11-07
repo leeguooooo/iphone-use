@@ -1,0 +1,60 @@
+name: Main build cache
+
+# pr-checks.yml restores its Rust cache but never saves it (every PR branch
+# saving its own copy evicted the one worth keeping). This is the one writer:
+# on every push to main it compiles the workspace the way the PR `test` job
+# does — same image, same pinned toolchain, same `shared-key` — so the next PR
+# starts from a warm dependency cache instead of a 20-minute cold build.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'site/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: main-cache
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: Build the workspace on main
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # Everything rust-cache hashes into its key must match pr-checks.yml.
+      CARGO_TERM_COLOR: always
+      RUST_TOOLCHAIN: 1.96.0
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      IPHONE_USE_URL: http://127.0.0.1:1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master; explicit pinned toolchain
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: workspace-macos
+          save-if: true
+
+      # Clippy, test and plain build artefacts differ; the PR job needs all
+      # three, so the same packages are compiled all three ways here.
+      - name: Compile what the PR checks compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --locked -- -D warnings
+          cargo test --locked --no-run -p core -p server -p iphone-use-mcp -p legacy-launch
+          cargo test --locked --no-run -p browser-session --features desktop
+          cargo build --locked -p iphone-use-mcp
+          cargo build --locked -p server --bin iphone-use
