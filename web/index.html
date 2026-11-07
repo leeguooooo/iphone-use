@@ -3,7 +3,7 @@
   iphone-use — remote-control web client  (web/index.html)
   ==========================================================
   Served at /phone (auth-gated).
-  WebDriverAgent only: H.264 via WebCodecs (/agent/h264) when the browser can
+  Runner only: H.264 via WebCodecs (/agent/h264) when the browser can
   decode it, else MJPEG (/agent/mjpeg); /agent/screenshot stills as fallback
   + cookie-authenticated POST /control (one JSON action per gesture, ACKed)
   Touch: Pointer Events → normalized [0,1] content-rect coords
@@ -1195,7 +1195,7 @@
 
 <script>
 /* ================================================================
-   iphone-use — WebDriverAgent client
+   iphone-use — runner client
    Contract legend:
      [TOUCH] Pointer Events  [iOS] Safari notes  [v1] parity affordance
    ================================================================ */
@@ -1428,7 +1428,7 @@ const I18N_EN = {
   '会锁屏 · 自动解锁': 'Will lock · auto-unlock',
   '{tag}：{text}': '{tag}: {text}',
   '锁屏提示：{tag}': 'Lock screen notice: {tag}',
-  '设备实时画面暂不可用 — 每 2.5 秒刷新，仍可点按操作': 'Live screen unavailable — refreshing every 2.5 s; you can still tap',
+  '设备实时画面暂不可用 — 每 {secs} 秒刷新，仍可点按操作': 'Live screen unavailable — refreshing every {secs} s; you can still tap',
   '设备实时画面正在连接…': 'Connecting the live screen…',
   '正在获取设备状态…': 'Getting device status…',
   '正在重新连接设备…': 'Reconnecting the device…',
@@ -1729,6 +1729,22 @@ const DIRECT_CONTROL_MAX_QUEUE = 4;
 const DIRECT_CONTROL_MAX_AGE_MS = 2000;
 const RECONNECT_REQUEST_TIMEOUT_MS = 15000;
 const RECONNECT_COOLDOWN_MS = 3000;
+// Who this browser is to the daemon's owner lease (X-Phone-Owner, see
+// crates/server/src/http.rs claim_phone_owner): one id per browser profile,
+// generated once, so this page's taps renew its own lease like the iOS app's
+// ("ios-remote") do, and the owner badge knows when the holder is this page.
+// The daemon accepts 1–64 printable ASCII characters without quotes.
+const WEB_OWNER = (() => {
+  const KEY = 'iphone_use_owner';
+  const fresh = () => 'web-' + Array.from(crypto.getRandomValues(new Uint8Array(6)), b => b.toString(16).padStart(2, '0')).join('');
+  try {
+    const stored = localStorage.getItem(KEY);
+    if (/^web-[0-9a-f]{12}$/.test(stored || '')) return stored;
+    const id = fresh();
+    localStorage.setItem(KEY, id);
+    return id;
+  } catch { return fresh(); }
+})();
 
 /* ── DOM refs ─────────────────────────────────────────────────── */
 const videoArea      = document.getElementById('videoArea');
@@ -2355,7 +2371,7 @@ function syncDeviceIdentity(status) {
 }
 
 /* ── Device status ───────────────────────────────────────────────
-   The phone is served only over WebDriverAgent: H.264 or MJPEG (with
+   The phone is served only over the runner: H.264 or MJPEG (with
    screenshot stills as fallback) for video and cookie-authenticated POST /control for
    input, each gesture explicitly acknowledged. */
 const STATUS_REQUEST_TIMEOUT_MS = 8000;
@@ -2532,14 +2548,17 @@ const h264Frame = document.getElementById('h264Frame');
 const MJPEG_RETRY_BASE_MS = 5000;
 const MJPEG_RETRY_MAX_MS = 30000;
 const MJPEG_FRAME_FRESH_MS = 8000;
-// Screenshot fallback refreshes every 2.5s. Three missed refreshes are enough
-// to treat its retained image as historical rather than safe control context.
+// Screenshot fallback refreshes every STILL_POLL_MS (2.5 s, or 0.4 s behind a
+// buffered tunnel). 8 s without a refresh is enough to treat its retained
+// image as historical rather than safe control context.
 const STILL_FRAME_FRESH_MS = 8000;
 // Cloudflare quick tunnels (*.trycloudflare.com) hold a streamed response
 // until it ends, so the H.264/MJPEG stream never arrives there: skip it and
 // poll stills quickly instead (see crates/server/src/remote.rs).
 const STREAMS_BUFFERED = /\.trycloudflare\.com$/i.test(location.hostname);
 const STILL_POLL_MS = STREAMS_BUFFERED ? 400 : 2500;
+// The interval as people read it ("2.5" / "0.4"), for the metrics and overlay.
+const STILL_POLL_SECS = String(STILL_POLL_MS / 1000);
 const STILL_REQUEST_TIMEOUT_MS = 7000;
 let directFeedActive = false;
 let stillsTimer = null, stillsStartTimer = null;
@@ -2727,7 +2746,7 @@ async function fetchStill(generation = stillsGeneration) {
       stillFrame.onload = () => setScreenAspect(stillFrame.naturalWidth, stillFrame.naturalHeight);
       stillFrame.src = next;
       if (!mjpegLive) stillFrame.classList.add('active');
-      olSub.textContent = t('设备实时画面暂不可用 — 每 2.5 秒刷新，仍可点按操作');
+      olSub.textContent = t('设备实时画面暂不可用 — 每 {secs} 秒刷新，仍可点按操作', { secs: STILL_POLL_SECS });
       syncDirectFrameFreshness();
     }
   } catch (_) {
@@ -3477,6 +3496,7 @@ function sendDirectControl(obj) {
         headers: {
           'Content-Type': 'application/json',
           'X-Phone-Control': '1',
+          'X-Phone-Owner': WEB_OWNER,
         },
         body: JSON.stringify({
           ...obj,
@@ -5281,6 +5301,7 @@ flowRun.addEventListener('click', async () => {
       headers: {
         'Content-Type': 'application/json',
         'X-Phone-Control': '1',
+        'X-Phone-Owner': WEB_OWNER,
       },
       body: JSON.stringify({
         steps: batchSteps,
@@ -6004,7 +6025,9 @@ function noteOwnerRefusal(result) {
   syncOwnerBadge({ owner: lastOwnerRefusal.owner, owner_lease_remaining_secs: lastOwnerRefusal.owner_lease_remaining_secs });
 }
 function syncOwnerBadge(status) {
-  const owner = typeof status?.owner === 'string' ? status.owner.trim() : '';
+  let owner = typeof status?.owner === 'string' ? status.owner.trim() : '';
+  // This page's own lease (its taps renew it) is not another session.
+  if (owner === WEB_OWNER) owner = '';
   ownerBadge.hidden = !owner;
   if (!owner) return;
   const left = Number(status.owner_lease_remaining_secs);
@@ -6063,7 +6086,7 @@ function renderMetrics() {
   } else if (mjpegFrame.classList.contains('active')) {
     parts.push(['MJPEG', '']);
   } else if (stillFrame.classList.contains('active')) {
-    parts.push([t('截图'), '2.5 s']);
+    parts.push([t('截图'), `${STILL_POLL_SECS} s`]);
   }
   if (controlRttMs != null) parts.push([t('操作'), `${Math.round(controlRttMs)} ms`]);
   else if (Number.isFinite(backendStatus?.runner_rtt_ms)) parts.push([t('设备'), `${backendStatus.runner_rtt_ms} ms`]);
@@ -6088,7 +6111,20 @@ function renderMetrics() {
     metricsEl.title = t('画面编码 · 帧率 · 点按往返时间 · 手机连接方式');
   }
 }
-setInterval(renderMetrics, 1000);
+// A hidden tab renders no frames and nobody reads the pill: skip the work,
+// and restart the fps window on return so the first visible reading does
+// not average over the whole absence.
+let metricsWereHidden = false;
+function renderMetricsOnInterval() {
+  if (document.visibilityState !== 'visible') { metricsWereHidden = true; return; }
+  if (metricsWereHidden) {
+    metricsWereHidden = false;
+    renderedFrames = 0;
+    frameRateAt = performance.now();
+  }
+  renderMetrics();
+}
+setInterval(renderMetricsOnInterval, 1000);
 
 /* ── Screen geometry follows the stream ─────────────────────────── */
 function setScreenAspect(w, h) {

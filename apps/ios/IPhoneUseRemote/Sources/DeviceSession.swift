@@ -16,6 +16,23 @@ final class DeviceSession: ObservableObject, Identifiable {
     /// (half size, low bit rate), which keeps several decoders cheap.
     enum ViewerRole { case tile, full }
 
+    /// How stills stand in for the stream on a route that buffers it: how
+    /// often one is fetched and how large. The full screen refreshes
+    /// briskly; a grid tile only needs a small picture every couple of
+    /// seconds (each poll is one request through the tunnel, and a grid
+    /// polls once per tile).
+    struct StillsPace: Equatable {
+        let intervalMs: Int
+        let maxSide: Int
+    }
+
+    nonisolated static func stillsPace(for role: ViewerRole) -> StillsPace {
+        switch role {
+        case .full: return StillsPace(intervalMs: 300, maxSide: 800)
+        case .tile: return StillsPace(intervalMs: 2000, maxSide: 360)
+        }
+    }
+
     @Published var record: DeviceRecord
     nonisolated let id: UUID
     var address: String { record.address }
@@ -192,6 +209,7 @@ final class DeviceSession: ObservableObject, Identifiable {
             guard suspended != oldValue else { return }
             if suspended && !voiceCallKeepsConnection { cancelRetry() }
             updateStream()
+            updateStatusPolling()
         }
     }
 
@@ -201,6 +219,20 @@ final class DeviceSession: ObservableObject, Identifiable {
         didSet {
             if !voiceCallKeepsConnection && suspended { cancelRetry() }
             if voiceCallKeepsConnection { Task { await retryIfWaiting() } }
+            updateStatusPolling()
+        }
+    }
+
+    /// Status is read only while someone can act on it: in the background
+    /// (unless a voice call holds the connection) the poll pauses, and the
+    /// foreground's first read is immediate.
+    private func updateStatusPolling() {
+        let wanted = client != nil && (!suspended || voiceCallKeepsConnection)
+        if wanted, statusTask == nil {
+            startPolling()
+        } else if !wanted, let task = statusTask {
+            task.cancel()
+            statusTask = nil
         }
     }
 
@@ -214,8 +246,9 @@ final class DeviceSession: ObservableObject, Identifiable {
 
     @Published private var redactedTask: Task<Void, Never>?
     /// Stills in place of the stream on a route that buffers it (see
-    /// `DaemonClient.streamsBuffered`).
+    /// `DaemonClient.streamsBuffered`), paced for `stillsRole`.
     private var stillsTask: Task<Void, Never>?
+    private var stillsRole: ViewerRole = .tile
     @Published private(set) var client: DaemonClient?
     @Published private var reader: H264StreamReader?
     /// The mode the running reader asked for.
@@ -437,7 +470,9 @@ final class DeviceSession: ObservableObject, Identifiable {
         cancelRetry()
         linkUp()
         phase = .connected
-        startPolling()
+        // Not startPolling() directly: a connect that finishes in the
+        // background (a voice call's reconnect excepted) stays paused.
+        updateStatusPolling()
         startPathMonitor()
         updateStream()
     }
@@ -632,17 +667,27 @@ final class DeviceSession: ObservableObject, Identifiable {
             reader = nil
             mjpegReader?.stop()
             mjpegReader = nil
+            // A tile promoted to the full screen (or the reverse) changes
+            // pace: restart the poll, keeping the last picture up.
+            if let task = stillsTask, stillsRole != role {
+                task.cancel()
+                stillsTask = nil
+            }
             if stillsTask == nil {
-                if videoWaitSince == nil { videoWaitSince = Date() }
+                // Waiting for a picture only when there is none yet (a
+                // restart for pace keeps the last still up).
+                if videoWaitSince == nil, mjpegImage == nil { videoWaitSince = Date() }
+                stillsRole = role
+                let pace = Self.stillsPace(for: role)
                 stillsTask = Task { [weak self] in
                     while !Task.isCancelled {
                         guard let self, let client = self.client, client.streamsBuffered else { return }
-                        if let (data, _) = try? await client.screenshot(maxSide: 800),
+                        if let (data, _) = try? await client.screenshot(maxSide: pace.maxSide),
                            let image = UIImage(data: data), !Task.isCancelled {
                             self.mjpegImage = image
                             self.frameArrived()
                         }
-                        try? await Task.sleep(for: .milliseconds(300))
+                        try? await Task.sleep(for: .milliseconds(pace.intervalMs))
                     }
                 }
             }
