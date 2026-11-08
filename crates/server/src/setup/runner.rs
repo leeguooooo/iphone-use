@@ -1481,7 +1481,7 @@ mod tests {
             std::fs::write(&path, bytes).unwrap();
             super::super::embed::EmbedLib {
                 path: path.clone(),
-                sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
+                sha256: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes)),
             }
         };
         let component = super::super::embed::cache_component;
