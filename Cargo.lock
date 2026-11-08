@@ -365,7 +365,7 @@ dependencies = [
  "rpassword",
  "rusqlite",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "url",
  "zeroize",
 ]
@@ -528,7 +528,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "subtle",
 ]
 
@@ -1236,7 +1236,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -1311,7 +1311,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2439,7 +2439,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -2472,6 +2472,17 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
 ]
 
 [[package]]

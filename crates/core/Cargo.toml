@@ -7,7 +7,7 @@ license-file = "../../LICENSE"
 [dependencies]
 schemars = { version = "1", optional = true }
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2"
 getrandom = "0.4"
 base64 = "0.22"

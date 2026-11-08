@@ -50,7 +50,7 @@ libc = "0.2"
 base64 = "0.22"
 
 # Registry checksums (flow update verifies every file against index.json)
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 
 # `flow publish` clones the registry into a scratch directory
