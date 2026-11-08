@@ -611,6 +611,48 @@ fn logout_clears_cookie() {
     });
 }
 
+#[test]
+fn a_relayed_login_scopes_the_cookie_to_the_phone_prefix() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        let set_cookie_for = |prefix: Option<&'static str>, uri: &'static str| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::builder()
+                    .method(if uri == "/login" { "POST" } else { "GET" })
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                if let Some(prefix) = prefix {
+                    request = request.header("x-forwarded-prefix", prefix);
+                }
+                let body = if uri == "/login" { Body::from("password=hunter2") } else { Body::empty() };
+                let resp = app.oneshot(request.body(body).unwrap()).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+                resp.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string()
+            }
+        };
+        // Through the relay: the browser sees this daemon under /p/<id>.
+        let cookie = set_cookie_for(Some("/p/0123abcd_XYZ-9"), "/login").await;
+        assert!(cookie.contains("; Path=/p/0123abcd_XYZ-9;"), "{cookie}");
+        // Logout clears the same path, else the browser keeps the old cookie.
+        let cleared = set_cookie_for(Some("/p/0123abcd_XYZ-9"), "/logout").await;
+        assert!(cleared.contains("; Path=/p/0123abcd_XYZ-9;"), "{cleared}");
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        // On the LAN there is no prefix: the cookie stays at the root.
+        let plain = set_cookie_for(None, "/login").await;
+        assert!(plain.contains("; Path=/;"), "{plain}");
+        // A prefix that is not a clean path is ignored, never written into
+        // the header (`;` would end the attribute and start another).
+        for bad in ["p/noslash", "/p/x;Secure", "/p/a b", "/p/é"] {
+            let cookie = set_cookie_for(Some(bad), "/login").await;
+            assert!(cookie.contains("; Path=/;"), "{bad}: {cookie}");
+        }
+        let long = Box::leak(format!("/p/{}", "a".repeat(130)).into_boxed_str());
+        let cookie = set_cookie_for(Some(long), "/login").await;
+        assert!(cookie.contains("; Path=/;"), "{cookie}");
+    });
+}
+
 // ── Agent operation entry (/agent/*) ─────────────────────────────────────────
 
 #[test]
@@ -3133,6 +3175,107 @@ fn wrong_agent_token_counts_toward_rate_limit_lockout() {
 }
 
 // ── Shortcuts RPC inbox (/agent/inbox) ───────────────────────────────────────
+
+#[test]
+fn bare_probes_without_a_credential_never_lock_the_daemon() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+
+        // Ten requests that present nothing at all: no cookie, no bearer. A
+        // scanner or a health check must not be able to lock the real client out.
+        for i in 0..10 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/agent/input")
+                        .header("x-phone-control", "1")
+                        .body(Body::from(r#"{"type":"tap","x":0.5,"y":0.5}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "bare probe {i}");
+        }
+        // The correct bearer still works: nothing above counted as a guess.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/status")
+                    .header(header::AUTHORIZATION, "Bearer hunter2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "a bare probe is not a failed guess");
+    });
+}
+
+#[test]
+fn a_minted_session_survives_a_bearer_lockout() {
+    block(async {
+        let app = http::router(build_state(Some("hunter2")));
+        // Sign in first: /login is itself limiter-gated.
+        let cookie = login_cookie(&app, "hunter2").await;
+
+        for _ in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/agent/status")
+                        .header(header::AUTHORIZATION, "Bearer nope")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        // Locked: even the right bearer waits (credential guessing is slowed).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/status")
+                    .header(header::AUTHORIZATION, "Bearer hunter2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // The session minted before the attack is not a guess: it keeps
+        // working on the browser-or-bearer route…
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/status")
+                    .header(header::COOKIE, cookie.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "cookie session on /agent/status while locked");
+        // …and on a route gated by `agent_auth_refusal` (the iPhone app's path).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agent/tasks")
+                    .header(header::COOKIE, cookie.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS, "cookie session on /agent/tasks while locked");
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED, "cookie session on /agent/tasks while locked");
+    });
+}
 
 #[test]
 fn inbox_get_peeks_and_explicit_post_drain_is_atomic() {

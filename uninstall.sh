@@ -1049,6 +1049,166 @@ PY
     return 0
 }
 
+# `iphone-use remote tailscale on` enrolled this Mac as its own device on
+# the user's tailnet (state under $STATE_DIR/remote/tailscale). Sign it out
+# while the daemon and the bundled helper are still installed, so the device
+# does not linger in the Tailscale admin console. Best effort: nothing here
+# fails the uninstall, and the attempt is bounded so an unreachable control
+# server cannot hang it.
+remote_tailscale_logout() {
+    local remote_dir="$STATE_DIR/remote"
+    local helper="$APP_PATH/Contents/MacOS/iphone-use-tailnet"
+    local pid waited=0
+    [ "$STATE_SAFE" = "1" ] || return 0
+    [ -f "$remote_dir/remote.json" ] && [ ! -L "$remote_dir/remote.json" ] || return 0
+    [ -d "$remote_dir/tailscale" ] && [ ! -L "$remote_dir/tailscale" ] || return 0
+    if [ ! -x "$APP_BINARY" ] || [ ! -x "$helper" ]; then
+        warn "Tailscale access was set up but the app or its helper is gone; if the device is still listed in the Tailscale admin console, remove it there"
+        return 0
+    fi
+    set -- remote
+    [ "$INSTANCE_NAME" = default ] || set -- "$@" --instance "$INSTANCE_NAME"
+    set -- "$@" tailscale logout
+    if [ "$DRY_RUN" = "1" ]; then
+        plan "sign out of Tailscale: $APP_BINARY $*"
+        return 0
+    fi
+    "$APP_BINARY" "$@" >/dev/null 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 60 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        warn "Tailscale sign-out did not finish in 60s; remove the device in the Tailscale admin console if it is still listed"
+        return 0
+    fi
+    if wait "$pid"; then
+        ok "signed this Mac out of Tailscale"
+    else
+        warn "could not sign out of Tailscale; remove the device in the Tailscale admin console if it is still listed"
+    fi
+    return 0
+}
+
+# install.sh lays the agent skill down at ~/.agents/skills/iphone-use (one
+# file, SKILL.md), links ~/.claude/skills/iphone-use to it for Claude Code,
+# and strips a floating `skills.iphone-use` entry from the global skills
+# lock. Shared by every instance, so all of it goes with the default one;
+# anything that is not what install.sh created is left alone with a warning.
+remove_agent_skill() {
+    local canonical="$HOME/.agents/skills/iphone-use"
+    local link="$HOME/.claude/skills/iphone-use"
+    local current owner entry parent_real
+    if [ -L "$link" ]; then
+        current="$(readlink "$link" 2>/dev/null || true)"
+        if [ "$current" = "../../.agents/skills/iphone-use" ] || [ "$current" = "$canonical" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                plan "remove Claude Code skill link $link"
+            elif rm -f "$link"; then
+                ok "removed $link"
+                rmdir "$HOME/.claude/skills" 2>/dev/null || true
+            else
+                warn "could not remove $link"
+            fi
+        else
+            warn "preserving $link: it points at ${current:-an unreadable target}, not the installed skill"
+        fi
+    elif [ -e "$link" ]; then
+        warn "preserving $link: not the symlink install.sh creates"
+    fi
+
+    if [ -L "$canonical" ]; then
+        warn "preserving $canonical: install.sh never makes it a symlink"
+    elif [ -d "$canonical" ]; then
+        owner="$(stat -f '%u' "$canonical" 2>/dev/null || true)"
+        parent_real="$(cd -P "$HOME/.agents/skills" 2>/dev/null && pwd -P || true)"
+        if [ "$owner" != "$UID_NUM" ]; then
+            warn "preserving $canonical: not owned by uid $UID_NUM"
+        elif [ "$parent_real" != "$HOME/.agents/skills" ]; then
+            warn "preserving $canonical: its parent resolves elsewhere ($parent_real)"
+        elif [ ! -f "$canonical/SKILL.md" ]; then
+            warn "preserving $canonical: no SKILL.md, so not the skill install.sh laid down"
+        else
+            # Only regular files, as installed. A subdirectory or symlink
+            # means someone has put their own work here.
+            for entry in "$canonical"/* "$canonical"/.[!.]*; do
+                [ -e "$entry" ] || [ -L "$entry" ] || continue
+                if [ -L "$entry" ] || [ ! -f "$entry" ]; then
+                    warn "preserving $canonical: $entry is not a plain file install.sh wrote"
+                    return 0
+                fi
+            done
+            if [ "$DRY_RUN" = "1" ]; then
+                plan "remove agent skill directory $canonical"
+            elif rm -rf "$canonical" && [ ! -e "$canonical" ]; then
+                ok "removed $canonical"
+                rmdir "$HOME/.agents/skills" 2>/dev/null || true
+                rmdir "$HOME/.agents" 2>/dev/null || true
+            else
+                warn "could not remove $canonical"
+            fi
+        fi
+    elif [ -e "$canonical" ]; then
+        warn "preserving $canonical: not a directory"
+    fi
+
+    remove_skill_lock_entry "$HOME/.agents/.skill-lock.json"
+    # install.sh also keeps the XDG skills lock clean when XDG_STATE_HOME is set.
+    [ -z "${XDG_STATE_HOME:-}" ] \
+        || remove_skill_lock_entry "${XDG_STATE_HOME%/}/skills/.skill-lock.json"
+    return 0
+}
+
+# Drop only `skills.iphone-use` from a skills lock file (the key `skills add`
+# and install.sh manage); every other key is kept and the old file is backed
+# up as <file>.iphone-use.bak.
+remove_skill_lock_entry() {
+    local file="$1" rc=0
+    [ -f "$file" ] && [ ! -L "$file" ] || return 0
+    [ "$(stat -f '%u' "$file" 2>/dev/null || true)" = "$UID_NUM" ] || {
+        warn "preserving $file: not owned by uid $UID_NUM"
+        return 0
+    }
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$file" "$DRY_RUN" 2>/dev/null <<'PY' || rc=$?
+import json, os, shutil, sys, tempfile
+path, dry = sys.argv[1:3]
+path = os.path.realpath(path)
+try:
+    with open(path, encoding="utf-8") as f:
+        lock = json.load(f)
+except (OSError, ValueError):
+    sys.exit(5)
+skills = lock.get("skills") if isinstance(lock, dict) else None
+if not (isinstance(skills, dict) and "iphone-use" in skills):
+    sys.exit(3)
+if dry == "1":
+    sys.exit(2)
+del skills["iphone-use"]
+shutil.copy2(path, path + ".iphone-use.bak")
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".iphone-use.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(lock, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    case "$rc" in
+        0) ok "removed the iphone-use entry from $file (backup: $file.iphone-use.bak)" ;;
+        2) plan "remove the iphone-use entry from $file" ;;
+        3) ;;
+        *) warn "could not update $file; delete \"iphone-use\" under skills by hand" ;;
+    esac
+    return 0
+}
+
 remove_owned_app() {
     local path="$1"
     local expected_path="$2"
@@ -1321,6 +1481,13 @@ state_unknown_entries() {
                 ;;
             auto-update.lock)
                 # A run's lock directory, left behind if the run was killed.
+                if [ -L "$entry" ] || [ ! -d "$entry" ]; then
+                    printf '%s\n' "$entry"
+                fi
+                ;;
+            remote)
+                # Remote-access configuration and helper state
+                # (`iphone-use remote`), removed in step 5.
                 if [ -L "$entry" ] || [ ! -d "$entry" ]; then
                     printf '%s\n' "$entry"
                 fi
@@ -1623,6 +1790,7 @@ printf '\n=== iphone-use safe uninstall ===\n\n'
 [ "$DRY_RUN" = "0" ] || info "dry-run: no process, file, app, or phone will be changed"
 
 info "1/5 stopping the iphone-use daemon"
+remote_tailscale_logout
 DAEMON_RUNTIME_CLEAN=1
 LEGACY_RUNTIME_CLEAN=1
 stop_owned_job daemon "$DAEMON_LABEL" "$DAEMON_PLIST" || DAEMON_RUNTIME_CLEAN=0
@@ -1694,6 +1862,7 @@ if [ "$DAEMON_RUNTIME_CLEAN" = "1" ]; then
     [ "$DAEMON_ARTIFACTS_CLEAN" = "0" ] || remove_agent_mcp_entries
     if [ "$INSTANCE_NAME" = default ]; then
         [ "$DAEMON_ARTIFACTS_CLEAN" = "0" ] || remove_cli_link || DAEMON_ARTIFACTS_CLEAN=0
+        [ "$DAEMON_ARTIFACTS_CLEAN" = "0" ] || remove_agent_skill
     elif [ "$DAEMON_ARTIFACTS_CLEAN" = "1" ] && [ -d "$APP_PARENT" ] && [ ! -L "$APP_PARENT" ]; then
         if [ "$DRY_RUN" = "1" ]; then
             plan "remove empty directory $APP_PARENT"
@@ -1765,6 +1934,8 @@ if [ "$FAILED" = "0" ] \
     # Device runner build products (per instance). Only reached once the
     # runner itself is verified stopped.
     remove_tree "$STATE_DIR/runner-build" "$STATE_DIR/runner-build" "$STATE_DIR"
+    # Remote-access configuration, tokens and helper state (`iphone-use remote`).
+    remove_tree "$STATE_DIR/remote" "$STATE_DIR/remote" "$STATE_DIR"
     # The runner sources install.sh lays down are shared by every instance:
     # removed with the default instance, and only when no named instance
     # remains to build from them.

@@ -159,7 +159,10 @@ esac
 # executable.
 LEGACY_LAUNCH_BINARY="$APP/Contents/MacOS/iphone-use-legacy-launch"
 [ -f "$LEGACY_LAUNCH_BINARY" ] || LEGACY_LAUNCH_BINARY=""
-for binary in "$MCP_BINARY" ${LEGACY_LAUNCH_BINARY:+"$LEGACY_LAUNCH_BINARY"} "$DAEMON_BINARY"; do
+# The Tailscale helper (remote access) is nested code as well.
+TAILNET_BINARY="$APP/Contents/MacOS/iphone-use-tailnet"
+[ -f "$TAILNET_BINARY" ] || TAILNET_BINARY=""
+for binary in "$MCP_BINARY" ${LEGACY_LAUNCH_BINARY:+"$LEGACY_LAUNCH_BINARY"} ${TAILNET_BINARY:+"$TAILNET_BINARY"} "$DAEMON_BINARY"; do
     echo "Signing binary: $binary ..."
     codesign \
         --force \

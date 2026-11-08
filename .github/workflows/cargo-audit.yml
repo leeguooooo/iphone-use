@@ -1,0 +1,32 @@
+name: cargo audit
+
+# RustSec advisories against Cargo.lock: on every PR (cheap, Ubuntu, under a
+# minute) and weekly, since an advisory can land without any commit here.
+# Unmaintained-crate notices are warnings and do not fail the run; a
+# vulnerability does.
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - '.github/workflows/cargo-audit.yml'
+  schedule:
+    - cron: '17 3 * * 1' # Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: RustSec advisories (Cargo.lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

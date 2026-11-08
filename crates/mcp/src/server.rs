@@ -50,12 +50,8 @@ pub struct TapParams {
     /// Vertical position, normalized 0–1 (0 = top edge, 1 = bottom edge).
     #[schemars(range(min = 0.0, max = 1.0))]
     pub y: f64,
-    /// On by default: the result carries what the screen settled to — what
-    /// changed since your last look (`delta`), or the whole tree the first
-    /// time — so you rarely need `phone_elements` afterwards. The settled
-    /// screen is also captured but NOT sent: `phone_screenshot` returns it at
-    /// once if you need to see it. `false` skips both for the fastest bare
-    /// action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -75,8 +71,8 @@ pub struct ScrollParams {
     /// Vertical scroll delta. **Positive dy reveals content farther down**;
     /// negative dy reveals content above. ~80 ≈ 15% of a screen, ~400 ≈ 75%.
     pub dy: f64,
-    /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -96,7 +92,8 @@ pub struct TypeParams {
     pub budget_ms: Option<u64>,
     /// Clear the bound field first. Never combine with continue_token.
     pub clear: Option<bool>,
-    /// Default true: return the settled screen change after a completed action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     pub observe: Option<bool>,
 }
 
@@ -208,8 +205,8 @@ pub struct TapLabelParams {
     /// The element's visible accessibility label, exactly as shown by
     /// `phone_elements` (e.g. "新备忘录", "Connect").
     pub label: String,
-    /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -222,8 +219,8 @@ pub struct TapElementParams {
     pub element: usize,
     /// Snapshot token from the same `phone_elements` response.
     pub snapshot: String,
-    /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -231,6 +228,15 @@ pub struct TapElementParams {
 /// `phone_screenshot`'s default size: legible, and ~40 % fewer image tokens
 /// than a full-resolution capture.
 const DEFAULT_SCREENSHOT_MAX_SIDE: u32 = 1200;
+
+/// Longest sides `phone_screenshot` steps down through, largest first, until
+/// the base64 image fits [`SCREENSHOT_BUDGET_BYTES`] (the daemon's element
+/// read does the same, `scope::IMAGE_SIDES`).
+const SCREENSHOT_SIDES: [u32; 3] = [1200, 800, 500];
+
+/// Longest base64 image one `phone_screenshot` reply carries: clients hand
+/// the model a result of this size whole.
+const SCREENSHOT_BUDGET_BYTES: usize = 1_500_000;
 
 /// Parameters for [`phone_screenshot`].
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -281,8 +287,8 @@ pub struct KeyParams {
     /// Supported names: `return`/`enter`, `escape`, `space`, `tab`,
     /// `delete`/`backspace`, `up`, `down`, `left`, `right`.
     pub name: String,
-    /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -294,8 +300,8 @@ pub struct ShortcutParams {
     /// Home, Spotlight, Photos capture (`save_screenshot`), or physical-only `volume_up` / `volume_down`.
     /// App Switcher is unsupported by the device runner.
     pub name: String,
-    /// Default true: return what the screen settled to (as on phone_tap).
-    /// `false` for the fastest bare action.
+    /// Default true: reply with the settled screen (delta since your last
+    /// look, or the full tree); false = bare action, fastest.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -304,13 +310,11 @@ pub struct ShortcutParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunStepsParams {
-    /// Ordered steps. The daemon validates the whole list before sending the
-    /// first action and stops immediately when any action or wait condition
-    /// fails.
+    /// Ordered steps (max 24); validated as a whole first, stops at the
+    /// first failure.
     pub steps: Vec<PhoneStep>,
-    /// Return the screen the batch ended on (`snapshot`, `elements`, `alert`)
-    /// in the same reply, so the next decision needs no phone_elements call.
-    /// Default true; set false only when you will not look at the result.
+    /// Default true: reply with the screen the batch ended on (`snapshot`,
+    /// `elements`, `alert`); false when you will not look at it.
     #[serde(default)]
     pub observe: Option<bool>,
 }
@@ -337,32 +341,35 @@ pub struct PhoneHoldPoint {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PhoneStep {
-    /// Tap normalized screen coordinates. Prefer `tap_locator` (durable in a
-    /// saved flow) whenever the target has a label or identifier.
+    /// Tap normalized coordinates; prefer `tap_locator` when the target has
+    /// a label or identifier.
     Tap {
         x: f64,
         y: f64,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Long-press normalized screen coordinates.
+    /// Long-press normalized coordinates (duration_ms default 600).
     Longpress {
         x: f64,
         y: f64,
         #[serde(default = "default_phone_longpress_ms")]
         duration_ms: u64,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Hold 2–5 distinct normalized points simultaneously; array length is finger count.
+    /// Hold 2–5 normalized points at once (duration_ms default 1000).
     MultiLongpress {
         points: Vec<PhoneHoldPoint>,
         #[serde(default = "default_phone_multi_longpress_ms")]
         duration_ms: u64,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Swipe once from one normalized screen point to another.
+    /// Swipe from (x1,y1) to (x2,y2), normalized; duration_ms default 300.
     Swipe {
         x1: f64,
         y1: f64,
@@ -370,12 +377,12 @@ pub enum PhoneStep {
         y2: f64,
         #[serde(default = "default_phone_swipe_ms")]
         duration_ms: u64,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Hold, then drag continuously. Use either x1/y1/x2/y2 or 2–16
-    /// normalized points with optional dwell_ms at each stop. For points,
-    /// duration_ms is travel time per segment; total hold/travel/dwell <= 10s.
+    /// Hold hold_ms (500), then drag: x1/y1→x2/y2, or 2–16 `points` with a
+    /// dwell_ms each; duration_ms (300) is travel per segment; total ≤ 10 s.
     Drag {
         x1: Option<f64>,
         y1: Option<f64>,
@@ -387,119 +394,123 @@ pub enum PhoneStep {
         hold_ms: u64,
         #[serde(default = "default_phone_swipe_ms")]
         duration_ms: u64,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
     /// Tap one exact, unique accessibility label.
     TapLabel {
         label: String,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Tap the one current element matching every supplied semantic locator
-    /// field. Zero or multiple matches send no tap.
+    /// Tap the single element matching every locator field; zero or several
+    /// matches send nothing.
     TapLocator {
         locator: PhoneElementLocator,
-        /// `point`: tap the centre of the element's live frame instead of
-        /// XCUIElement's click — for custom controls that ACK a click and do
-        /// nothing. Default `element`.
+        /// `point` taps the live frame's centre instead of XCUIElement's
+        /// click (custom controls that ACK and do nothing); default `element`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<String>,
-        /// Pass instead of failing when no element matches — for screens that
-        /// appear only sometimes ("Not now", "Skip"). Nothing is sent then.
+        /// Pass instead of failing when nothing matches (screens that appear
+        /// only sometimes: "Not now", "Skip").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         if_present: bool,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Type Unicode text into the focused field. `clear=true` clears that field
-    /// immediately before inserting the text as one compound action.
+    /// Type Unicode text into the focused field; clear=true empties it first.
     Type {
         text: String,
         #[serde(default)]
         clear: bool,
-        /// Optional per-call typing budget (6000..15000 ms).
+        /// Typing budget, 6000..15000 ms.
         #[schemars(range(min = 6000, max = 15000))]
         budget_ms: Option<u64>,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Continue only the unsent suffix held under a single-use original-field token.
+    /// Continue the unsent suffix of a type step with its single-use token.
     TypeContinue {
         #[schemars(length(min = 64, max = 64), regex(pattern = "^[0-9a-f]{64}$"))]
         continue_token: String,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Send one supported device-native key.
+    /// Send one device key (return, escape, space, tab, delete, up, down,
+    /// left, right).
     Key {
         name: String,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Trigger Home or Spotlight.
+    /// `home` or `spotlight`.
     Shortcut {
         name: String,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Scroll with the same normalized anchor and deltas as `phone_scroll`.
+    /// Scroll as `phone_scroll`: normalized anchor x,y; deltas dx,dy in
+    /// points, positive dy reveals content below.
     Scroll {
         x: f64,
         y: f64,
         dx: f64,
         dy: f64,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Launch or foreground an installed app: give exactly one of `bundle`
-    /// (its exact bundle identifier) or `app` (its name — 微信, WeChat,
-    /// 招商银行, Settings — which the daemon resolves through phone_apps; a
-    /// loose name that starts a word of exactly one installed app's name also
-    /// launches it, and the step's `resolved` says which; an ambiguous or
-    /// unknown name is refused with candidates, nothing sent).
+    /// Launch or foreground an app: exactly one of `bundle` (bundle id) or
+    /// `app` (name, resolved as phone_apps does; ambiguous or unknown names
+    /// are refused with candidates, nothing sent).
     LaunchApp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bundle: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         app: Option<String>,
-        /// Quit the app first so it opens on its first screen, not the page
-        /// it was left on (flows recorded on the phone start there).
+        /// Quit first so it opens on its first screen (where recorded flows
+        /// start).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fresh: bool,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Open a link (`https://…`, or a deep link such as `weixin://`) with
-    /// the app iOS assigns to it. http/https always work; other schemes
-    /// (tel, sms, mailto, app deep links) are refused unless the operator
-    /// allowed them in IPHONE_USE_ALLOW_URL_SCHEMES. It leaves the current
-    /// app, so guard the next screen with `wait_for`.
+    /// Open a link with the app iOS assigns it. http/https always; other
+    /// schemes only if IPHONE_USE_ALLOW_URL_SCHEMES allows them. Leaves the
+    /// current app: guard the next screen with `wait_for`.
     OpenUrl {
         url: String,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Navigate back inside the current application.
+    /// Navigate back inside the current app.
     Back {
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Press a button on a system alert (UIAlertController) through the device runner's
-    /// native alert route — the only path that actually acts on one; taps on
-    /// alert buttons are acknowledged without effect. Give the exact button
-    /// text, or `action: accept|dismiss` for the default/cancel button. Fails
-    /// closed when no alert is showing.
+    /// Press a system-alert button natively — the only path that acts on one
+    /// (taps on alert buttons ACK without effect). Exact `button` text, or
+    /// `action: accept|dismiss`. Fails when no alert is showing.
     Alert {
         #[serde(default)]
         button: Option<String>,
         #[serde(default)]
         action: Option<String>,
-        /// Pass instead of failing when no alert is up — for prompts that
-        /// appear only sometimes ("Allow Paste"). Flows using it need a
-        /// client that knows it.
+        /// Pass instead of failing when no alert is up (prompts that appear
+        /// only sometimes: "Allow Paste").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         if_present: bool,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
@@ -508,15 +519,14 @@ pub enum PhoneStep {
         #[serde(default)]
         column: usize,
         value: String,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Invoke a named affordance on a snapshot-bound element: toggle a
-    /// switch, increment/decrement or adjust a slider or stepper, and the
-    /// other names in phone_capabilities (`perform_actions`). `element` and
-    /// `snapshot` come from phone_elements. Snapshot-bound, so not for saved
-    /// flows. `value` only with `adjust`; `duration_ms` only with
-    /// `menu`/`force_press`. Verify the new `value` with wait_for.
+    /// Invoke an affordance (toggle, increment, decrement, adjust, …; see
+    /// phone_capabilities perform_actions) on `element`+`snapshot` from
+    /// phone_elements; not for saved flows. `value` only with adjust;
+    /// `duration_ms` only with menu/force_press. Verify with wait_for.
     Perform {
         element: u64,
         snapshot: String,
@@ -525,12 +535,12 @@ pub enum PhoneStep {
         value: Option<String>,
         #[serde(default)]
         duration_ms: Option<u64>,
+        /// Pause after this step, ms.
         #[serde(default)]
         after_ms: u64,
     },
-    /// Poll until the expectation holds. For tree waits, timeout_ms:0 makes
-    /// one observation attempt bounded to 500ms, without polling or read retry.
-    /// Use observe:false to omit the separate final batch observation.
+    /// Poll until `expect` holds (timeout_ms default 15000, poll_ms 250);
+    /// timeout_ms:0 is one 500 ms observation without polling.
     WaitFor {
         expect: PhoneUiExpectation,
         #[serde(default = "default_phone_wait_ms")]
@@ -538,7 +548,7 @@ pub enum PhoneStep {
         #[serde(default = "default_phone_poll_ms")]
         poll_ms: u64,
     },
-    /// A short animation pause. Prefer `wait_for` for correctness.
+    /// Fixed pause; prefer `wait_for`.
     Pause { ms: u64 },
 }
 
@@ -556,18 +566,16 @@ pub struct PhoneUiExpectation {
     /// Every locator in this list must match no current element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub absent: Vec<PhoneWaitSelector>,
-    /// Text that must be visible, read by OCR from screenshots — for canvas
-    /// screens (games, Flutter/Unity) whose element tree has no labels, e.g.
-    /// waiting out a game's loading screen. Case and spaces are ignored.
-    /// Cannot be combined with application/present/absent in one wait_for;
-    /// such a wait may take timeout_ms up to 60000.
+    /// Text that must be visible, read by OCR — for canvas screens (games,
+    /// Flutter/Unity) with no labels. Case and spaces ignored; not combinable
+    /// with application/present/absent; timeout_ms may reach 60000.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ocr_present: Vec<String>,
     /// Text that must not be visible (a loading caption), read by OCR.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ocr_absent: Vec<String>,
-    /// Wait until each absent target has first appeared and then disappeared;
-    /// use for loaders that may start after the preceding action returns.
+    /// Each absent target must first appear, then disappear (loaders that
+    /// start after the preceding action returns).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub absent_after_present: bool,
 }
@@ -1479,13 +1487,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Inspect supported UI operations and cached readiness before choosing an action. Unlike phone_status \
-        (device/setup/owner diagnostics), this names the backend's single-step, batch and perform \
-        vocabularies, observation support and accepted modes. Read-only: no device connection, wake or owner \
-        lease. supported is static; available is cached with blocked_by naming locked, released, \
-        reconnecting, human_handoff, owned_by_other or offline. ok:null is unknown, never proof of \
-        readiness. This describes UI control only, not app installation or other device management. If \
-        blocked, follow phone_status guidance instead of probing with actions."
+        description = "Supported UI operations and cached readiness: the backend's single-step, batch and perform \
+        vocabularies, observation support and accepted modes (phone_status covers \
+        device/setup/owner). Read-only: no device connection, wake or lease. supported is static; \
+        available is cached, blocked_by names locked, released, reconnecting, human_handoff, \
+        owned_by_other or offline; ok:null is unknown, never readiness. UI control only, not app \
+        install or device management. If blocked, follow phone_status."
     )]
     async fn phone_capabilities(&self) -> CallToolResult {
         match self.daemon.capabilities().await {
@@ -1498,12 +1505,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Read task performance aggregates for this MCP client's X-Phone-Owner on the selected instance. \
-        Includes recorded HTTP-call counts, batch/flow usage, stale/unknown outcomes, losses and p50/p95 call latency. \
-        HTTP calls are not model turns or token usage; model_round_trips remains null without a complete declared trace. \
-        Read-only: no phone connection, Runner launch or control lease. Default latest 5 open and recent runs, maximum \
-        20 per section and a shared 12 KiB row budget; omitted counts and truncated state are explicit. Never reconnect \
-        solely for metrics. Global cross-owner loss counters are excluded."
+        description = "Task performance aggregates for this client's X-Phone-Owner on the selected instance: \
+        HTTP-call counts, batch/flow usage, stale/unknown outcomes, losses, p50/p95 latency. HTTP \
+        calls are not model turns or tokens; model_round_trips stays null without a complete \
+        declared trace. Read-only: no connection, runner launch or lease — never reconnect for \
+        metrics. Default the latest 5 open and recent runs, max 20 per section, 12 KiB row budget; \
+        omitted counts and truncation are explicit."
     )]
     async fn phone_metrics(&self, Parameters(params): Parameters<MetricsParams>) -> CallToolResult {
         let limit = params.limit.unwrap_or(5);
@@ -1564,7 +1571,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = true),
-        description = "Read all home-screen pages, Dock, folder pages and widget stacks from the paired iPhone without opening folders, swiping, or taking screenshots. Optional page selects one zero-based page to reduce output. Requires a configured physical target reachable through usbmuxd. This metadata read does not require drivable=true or a running XCTest Runner; never reconnect or open Home solely for this read. Page indexes refer to persisted icon state, including hidden/Focus-filtered pages; they are not the visible page-control indexes. Zero-based row/col positions are derived from icon-state order and grid metrics; null positions or positions_complete=false mean unknown, never safe drag coordinates. Contains no pixel coordinates. An unreadable device returns an error rather than an empty home screen. Writing (action): backup saves the layout as a plist on the Mac; preview compares a plist with the phone by app identifier (added, removed, moved, widgets that would be lost); apply/restore replace the whole layout, only with confirm=true after the person agreed to the preview, and back up the replaced layout first. After a write read again: SpringBoard may bring App Library apps back over a few passes. Undo with action=restore."
+        description = "Read all home-screen pages, Dock, folders and widget stacks from the paired iPhone without \
+        swiping or screenshots. Needs a physical target over usbmuxd, not drivable=true or a runner: \
+        no reconnect. Page indexes are persisted icon state (hidden pages included); null row/col or \
+        positions_complete=false means unknown, never drag coordinates. action: backup (plist on the \
+        Mac), preview (diff plist vs phone), apply/restore (replace the layout; confirm=true only \
+        after the person saw the preview)."
     )]
     async fn phone_home_layout(
         &self,
@@ -1596,16 +1608,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Find an app's bundle id by name instead of guessing it. Read-only: \
-        it never touches the screen and takes no owner lease. Searches the phone's own app \
-        list, then a bundled catalog of popular apps (bundle ids verified against Apple's \
-        lookup API, plus Apple's built-in apps), then the App Store only when neither \
-        matched. Exact name/alias matches hide partial ones. Each candidate carries name, \
-        bundle_id, source (installed|catalog|apple), installed_verified, and publisher when \
-        known; installed_verified=false with installation_checked=false means unknown, not \
-        absent. Pick the candidate whose name and publisher fit, then launch it with \
-        launch_app bundle — or give launch_app `app` the exact name and let the daemon \
-        resolve it (it refuses ambiguous names with candidates instead of guessing)."
+        description = "Find an app's bundle id by name. Read-only: no screen access, no owner lease. Searches the \
+        phone's installed apps, then a verified catalog of popular apps and Apple's built-ins, then \
+        the App Store only when neither matched; exact matches hide partial ones. Candidates carry \
+        name, bundle_id, source (installed|catalog|apple), installed_verified and publisher; \
+        installed_verified=false with installation_checked=false means unknown, not absent. Then \
+        launch_app bundle (or `app` with the exact name)."
     )]
     async fn phone_apps(
         &self,
@@ -1634,31 +1642,52 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Read one iPhone screen as an image/png content block when pixels matter; use phone_elements for text \
-        and semantic targets, or phone_screen to let the person watch a live MCP Apps panel. It reuses the \
-        captured settled frame after an observed action. max_side defaults to 1200; 0 requests full \
-        resolution. overlay=true draws interactive frames and their phone_elements indexes. Capture only for \
-        the current user task; private holds or offline devices can refuse it. Follow phone_status guidance \
-        instead of reconnecting for health checks. An image alone does not prove an action succeeded; check \
-        the target state or receipt."
+        description = "One screen as an image/png block, when pixels matter; phone_elements for text/targets, \
+        phone_screen for the person's live panel. Reuses the settled frame after an observed action. \
+        max_side default 1200 (0 = full resolution; an oversized image is stepped down to fit 1.5 \
+        MB); overlay=true draws interactive frames with their phone_elements indexes. Capture only \
+        for the current task; private holds or offline devices refuse. An image does not prove an \
+        action succeeded; check the state or receipt."
     )]
     async fn phone_screenshot(
         &self,
         Parameters(ScreenshotParams { max_side, overlay }): Parameters<ScreenshotParams>,
     ) -> CallToolResult {
-        let max_side = match max_side {
+        let requested = match max_side {
             None => Some(DEFAULT_SCREENSHOT_MAX_SIDE),
             Some(0) => None,
             Some(side) => Some(side),
         };
-        match self
-            .daemon
-            .screenshot_with(max_side, overlay.unwrap_or(false))
-            .await
-        {
+        let overlay = overlay.unwrap_or(false);
+        let mut max_side = requested;
+        let mut shot = self.daemon.screenshot_with(max_side, overlay).await;
+        // Over budget (a dense full-resolution capture): step the long side
+        // down rather than hand the client an image it will truncate or drop.
+        while let Ok(bytes) = &shot {
+            if B64.encode(bytes).len() <= SCREENSHOT_BUDGET_BYTES {
+                break;
+            }
+            let Some(smaller) = SCREENSHOT_SIDES
+                .into_iter()
+                .find(|&side| max_side.is_none_or(|current| side < current))
+            else {
+                break;
+            };
+            max_side = Some(smaller);
+            shot = self.daemon.screenshot_with(max_side, overlay).await;
+        }
+        match shot {
             Ok(bytes) if !bytes.is_empty() => {
                 let b64 = B64.encode(&bytes);
-                CallToolResult::success(vec![Content::image(b64, "image/png")])
+                let mut content = vec![Content::image(b64, "image/png")];
+                if max_side != requested {
+                    content.push(Content::text(format!(
+                        "downscaled to max_side={} to fit the {} MB image budget",
+                        max_side.unwrap_or_default(),
+                        SCREENSHOT_BUDGET_BYTES / 1_000_000
+                    )));
+                }
+                CallToolResult::success(content)
             }
             Ok(_) => CallToolResult::error(vec![Content::text(
                 "screenshot returned empty data — inspect phone_status device_state, \
@@ -1708,13 +1737,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Move the current viewport with one device-side swipe; use phone_scroll_find to locate a known label, \
-        or phone_collect_list to read multiple pages. x,y are a normalized anchor in the intended scrollable \
-        region. Avoid text fields, sliders and screen edges: a misplaced gesture can edit a control or \
-        navigate away. Positive dy reveals content below, negative above; dx reveals right/left. Travel is \
-        1.5 times each delta in points, clamped to 15–75% of that screen dimension. Requires \
-        phone_status.drivable=true. observe defaults on and returns the settled screen change; inspect it \
-        before repeating a swipe."
+        description = "Move the viewport with one device-side swipe (phone_scroll_find to reach a known label, \
+        phone_collect_list to read several pages). x,y is a normalized anchor inside the scrollable \
+        region — avoid text fields, sliders and screen edges, a misplaced gesture can edit a control \
+        or navigate away. Positive dy reveals content below, negative above; dx right/left. Travel \
+        is 1.5× each delta in points, clamped to 15–75% of the screen. Inspect the observed result \
+        before repeating."
     )]
     async fn phone_scroll(
         &self,
@@ -1737,14 +1765,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Insert literal Unicode text into the currently focused iPhone field. Use phone_tap_element to focus \
-        the intended field first; use phone_key for a navigation or editing key. Requires \
-        phone_status.drivable=true. Text can replace a selection or reach the wrong field if focus changed. \
-        Long text is chunked. Optional budget_ms (6000..15000) can stop at a safe boundary; continue only \
-        with the returned continue_token, without text/clear/budget_ms. Tokens are single-use and scoped \
-        to the original field, owner, privacy, lifecycle and session. Unknown outcomes never issue a token. \
-        On partial failure inspect characters_confirmed and remaining_text; never resend the whole value blindly. observe defaults on and returns the settled screen change. Verify \
-        the resulting field before submitting; an unknown outcome is not evidence that nothing was typed."
+        description = "Type Unicode text into the focused field (focus it with phone_tap_element first; phone_key \
+        for editing keys). Text may replace a selection or land in the wrong field if focus moved. \
+        Long text is chunked; budget_ms (6000..15000) may stop at a safe boundary and return a \
+        single-use continue_token: continue with only that token. On partial failure read \
+        characters_confirmed and remaining_text; never resend the whole value blindly. Verify the \
+        field before submitting; unknown outcome ≠ nothing typed."
     )]
     async fn phone_type(&self, Parameters(params): Parameters<TypeParams>) -> CallToolResult {
         let action = match params.action() {
@@ -1806,16 +1832,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Use Home (home), Spotlight (spotlight), physical volume buttons (volume_up, volume_down), or request a system screenshot in Photos (save_screenshot). \
-        Volume acknowledgement confirms only a button request, not the volume level; Simulator and older Runners without ipu:volumeButtons refuse before dispatch. \
-        save_screenshot is a mutation, unlike phone_screenshot which only returns image bytes. Its receipt means requested, not saved_verified, and requires ipu:systemCaptureRequest. \
-        If iOS opens a screenshot preview, inspect the system UI and choose Done/Save to Photos for that existing image; never take another screenshot to complete its save. \
-        Check Photos or its picker before claiming it saved. Never replay an uncertain capture or volume request. \
-        Navigation leaves the current app or changes its visible state. Use phone_key for field keys, or \
-        phone_run_steps with launch_app for a specific app. Requires phone_status.drivable=true. Names are \
-        trimmed and case-insensitive. switcher and other names fail before input is sent; the runner cannot \
-        synthesize the App Switcher gesture. observe defaults on and returns the settled screen change. \
-        Verify it before another action; repeating system navigation may lose the current context."
+        description = "System shortcut: home, spotlight, volume_up/volume_down (physical device; the ACK confirms \
+        the request, not the level) or save_screenshot (a mutation, unlike phone_screenshot: the \
+        receipt means requested, not saved; if iOS shows a preview choose Done/Save there, never \
+        take another; check Photos before claiming saved). Never replay an uncertain capture or \
+        volume press. App Switcher is unsupported; unknown names fail before input. phone_key for \
+        field keys, launch_app for an app."
     )]
     async fn phone_shortcut(
         &self,
@@ -1849,19 +1871,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "THE DEFAULT WAY TO ACT: run a sequence of actions in ONE call and get the \
-        screen it ended on back in the same reply (observe, on by default) — one turn instead of one \
-        per tap. The daemon validates the whole \
-        sequence first, holds one control lock, and stops at the first failure. Use it as soon as a \
-        segment is understood; keep single-action tools for exploring an unknown screen. Step kinds: \
-        launch_app, open_url, tap_locator, tap_label, tap, type, key, shortcut, scroll, swipe, drag, \
-        longpress, multi_longpress (2–5 explicit normalized points held simultaneously), back, alert (system alerts; taps on them do not act), picker, perform (toggle a \
-        switch, adjust a slider: element+snapshot from phone_elements), wait_for, pause. Drag points can dwell at an edge while keeping one finger down. Guard every \
-        screen change with wait_for; never batch an irreversible step you have not verified. These \
-        step objects are exactly a saved flow's `steps` — when the response carries \
-        `flow_suggestion`, ask the user whether to keep the task as a flow (phone_flow_draft). \
-        The result names completed/applied counts and the failed step; retry_safe=false means \
-        DO NOT replay."
+        description = "THE DEFAULT WAY TO ACT: run several steps in ONE call and get the screen it ended on back \
+        (observe, default on): one turn, not one per tap. The daemon validates the whole batch, \
+        holds one lock, stops at the first failure. Single-action tools are for exploring. Guard \
+        screen changes with wait_for; never batch an unverified irreversible step. The steps are \
+        exactly a saved flow's `steps`: on `flow_suggestion` ask the user about phone_flow_draft. \
+        retry_safe=false: DO NOT replay."
     )]
     async fn phone_run_steps(
         &self,
@@ -1950,32 +1965,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "Read the phone's status without taking control. `owner` names the \
-        session currently driving the phone (this session presents IPHONE_USE_OWNER, \
-        else mcp-<pid>); if it is someone else, do not drive the phone — control calls \
-        will be refused with phone_owned. The JSON preserves \
-        backend, target_configured, managed_runner, managed_runner_pending, recovery_owner, \
-        device_state, screen_state, runner, runner_actionable, locked, drivable, released, \
-        hint, next_step, recovery, setup_blocked_on, setup_phase, and setup_message. Gate actions on drivable=true. \
-        If target_configured=false and recovery_owner=unconfigured, phone_instances is only installed instances: inspect \
-        xcrun devicectl list devices and run iphone-use doctor on the daemon host; ask which \
-        phone if ambiguous, then IPU_RUNNER_UDID=<UDID> iphone-use setup for the confirmed \
-        target only when the task authorizes it. Preserve --instance for named instances. \
-        `lock_readiness` says whether the phone locks on its own when idle (passcode_protected, \
-        auto_lock_secs, keep_awake, verdict, hint): will_lock_needs_person means a person must \
-        unlock it after a pause; tell the owner the hint instead of retrying. \
-        For trust, distinguish Trust This Computer pairing from developer-certificate approval \
-        under iPhone Settings > General > VPN & Device Management; use setup_message evidence. \
-        A separate passcode/automation prompt may appear later. \
-        needs_passcode_on_phone records a possible authorization requirement, not a confirmed visible prompt. \
-        Relay next_step; never request a passcode, pause screenshots/elements during sensitive input, \
-        and check status after the person finishes. Do not loop reconnect. \
-        `keep_runner_alive` (non-null) means idle release keeps the runner up because its next \
-        start would need a person. \
-        For status/health checks, report the state and stop. Idle release \
-        is intentional: reconnect (phone_reconnect, once) only when a current \
-        user-requested task needs the phone, recovery_owner=daemon, and no blocker or \
-        reconnect is in progress; then poll until drivable=true."
+        description = "Read the phone's state without taking control: owner (another session's owner means do not \
+        drive; control calls get phone_owned), device_state, screen_state, runner, locked, drivable, \
+        released, hint, next_step, recovery, setup_blocked_on/phase/message, lock_readiness \
+        (will_lock_needs_person: a person must unlock after a pause; relay the hint), \
+        keep_runner_alive. Act only on drivable=true; otherwise relay next_step and stop. Never ask \
+        for a passcode; pause reads while one is entered."
     )]
     async fn phone_status(&self) -> CallToolResult {
         match self.daemon.status().await {
@@ -2063,7 +2058,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint=true,open_world_hint=true),
-        description="Read one current element's AX value without tapping, focusing, waking or taking an owner lease. Give exactly one identifier or exact label from a fresh screen, optionally kind; ambiguity refuses. Use this when phone_elements marks value_truncated or the task needs full field text. Returns one bounded value in text with source/completeness metadata; complete means the AX attribute was not cut by this API, not that the app exposes its full document. A smaller max_utf16 returns truncated:true. Secure fields refuse; old runners without ipu:valueRead refuse rather than promote a preview. Owner/privacy changes withhold the value."
+        description="Read one element's AX value without tapping, focusing, waking or a lease. Give exactly one \
+        identifier or exact label from a fresh read, optionally kind; ambiguity refuses. Use when \
+        phone_elements marks value_truncated or the task needs the full field text. Returns one \
+        bounded value with source/completeness; complete means this API did not cut it, not that the \
+        app exposes its whole document. A smaller max_utf16 gives truncated:true. Secure fields and \
+        runners without ipu:valueRead refuse."
     )]
     async fn phone_read_value(&self, Parameters(params): Parameters<ReadValueParams>) -> CallToolResult {
         let limit = params.max_utf16.unwrap_or(8192);
@@ -2107,24 +2107,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = true),
-        description = "The current screen as text — use this instead of screenshots (an order \
-        of magnitude cheaper). Rows carry kind, label, identifier, value, rect and state, plus a \
-        `snapshot` token for phone_tap_element; indexes and snapshot tokens are valid for this read \
-        only. `query` keeps only rows containing that text (label, identifier, value, placeholder) \
-        and `limit` caps the rows. `selector` ANDs exact kind/identifier/name/label/value/enabled \
-        fields and case-sensitive label_contains; optional selector.index (integer0..199) selects one match after scope/query and before limit, retaining the original snapshot row index. Unknown earlier candidates or incomplete tree scope refuse the ordinal. name matches a non-empty identifier, otherwise the label; value_present checks whether the snapshot supplies a string value \
-        (including empty/truncated); false means omitted/null on non-secure rows, not a complete AX null; protected SecureTextField rows match neither boolean. It filters AX rows, not OCR. Queries preserve \
-        each row's index and the snapshot, so taps still \
-        work. Screen text shows at most 200 rows and 32 KiB of row text; an omission notice \
-        means a partial view, not absence or list completion. Narrow with query when needed. \
-        include_hidden=true expands off-screen/not-drawn rows instead of summarizing five labels; \
-        these rows are marked hidden and must be scrolled into view before acting. \
-        On the first read in a newly entered app a `registry` block lists saved flows for \
-        it: if one does the task, phone_flow_run it instead of tapping step by step. An `alert` \
-        block means a system alert is up: answer it with an `alert` step, taps on alerts do not act. \
-        ocr=auto adds text read from pixels when the tree has no interactive rows (games, \
-        canvases), ocr=force always; such rows have no element, tap their x/y with phone_tap. \
-        value_truncated marks an incomplete preview; use phone_read_value for the bounded full AX value. Requires phone_status drivable=true."
+        description = "The current screen as text — use instead of screenshots. Rows carry kind, label, identifier, \
+        value, rect, state and a `snapshot` token for phone_tap_element, valid for this read only. \
+        query/limit/selector narrow rows but keep their indexes. Max 200 rows / 32 KiB; an omission \
+        notice means a partial view. `registry` lists saved flows for a newly entered app: prefer \
+        phone_flow_run. `alert` = a system alert is up: use an `alert` step, taps on alerts do not \
+        act. OCR rows: phone_tap their x/y."
     )]
     async fn phone_elements(
         &self,
@@ -2372,24 +2360,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Start/restart on-device automation for the configured phone. \
-        This occupies the phone and may require the operator to unlock it. \
-        Use only to continue a current user-requested phone operation or screen/UI \
-        read that cannot proceed; never reconnect for initialization, status/health \
-        checks, a completed task, or to keep the phone ready. Idle release is intentional. \
-        Require phone_status released/offline and recovery_owner=daemon; inspect \
-        hint/setup_blocked_on first. Do not reconnect while releasing/reconnecting \
-        or a blocker remains. Once these conditions are met, call once, \
-        then wait for the outcome: pass wait_secs (e.g. 180) to block until drivable=true, \
-        a blocker (setup_blocked_on), or the timeout, instead of polling phone_status; \
-        `wait.outcome` is drivable, blocked, retrying, stopped or timeout; retrying means the \
-        supervisor will retry the blocker on its own within a minute, after the wait \
-        (wait.status.setup_retry.next_in_secs) — check phone_status after that before asking a \
-        person to act. A retry further out than a minute, or a blocker that held across one \
-        retry, is blocked. While it is reconnecting, report \
-        setup_phase/setup_message and obey setup_blocked_on. This tool \
-        never accepts a UDID and cannot switch devices. \
-        An externally managed runner returns an operator-owned recovery error."
+        description = "Start/restart on-device automation; occupies the phone, may need the operator to unlock it. \
+        Only to continue a current user-requested task that cannot proceed — never for \
+        initialization, health checks, a finished task or to keep the phone ready. Needs \
+        released/offline status, recovery_owner=daemon, no blocker or reconnect in progress. Call \
+        once; wait_secs blocks until drivable, a blocker or timeout (outcome retrying: the \
+        supervisor retries within a minute). Never switches devices."
     )]
     async fn phone_reconnect(
         &self,
@@ -2492,23 +2468,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Read a scrolling list across pages in ONE call instead of scroll + read \
-        turns: reads the rows of one kind (default Cell) on screen, swipes one page, reads \
-        again, and stops when the exposed page repeats (duplicate_page), end_label is on screen, \
-        or max_pages (default 6, max 10) is \
-        reached. Rows are deduplicated on (kind, identifier, label, value): different exposed \
-        identifiers preserve identical-looking rows. Absent or reused identifiers with identical \
-        content may still collapse, so reconcile counts the user cares about. `complete` is true ONLY when \
-        end_label was seen (complete_scope=end_label_visibility); business_complete is always false. \
-        duplicate_page is not proof the list ended. Changed pages continue even with no new deduplicated rows. Only \
-        what the accessibility tree exposes is collected. It swipes the live list, so the \
-        screen is left where the last page was; `snapshot` is that last page. \
-        Optional `snapshot` (from a read of the target app; never filled in for you): a known \
-        foreground app mismatch refuses before any swipe (app_changed; setup may already have affected the device). \
-        Results name the app. \
-        Owner/privacy changes stop further reads and scrolling. swipes_confirmed counts Native ACKs, \
-        swipes_uncertain may have reached the device; never replay uncertain scrolling. \
-        Requires phone_status drivable=true."
+        description = "Read a scrolling list across pages in ONE call: reads rows of one kind (default Cell), \
+        swipes a page, repeats until the page repeats (duplicate_page), end_label shows, or \
+        max_pages (default 6, max 10). Rows dedupe on (kind, identifier, label, value): look-alike \
+        rows without identifiers may collapse, so reconcile counts the user cares about. \
+        complete=true ONLY when end_label was seen; duplicate_page is not proof of the end. Leaves \
+        the screen on the last page. swipes_uncertain: never replay."
     )]
     async fn phone_collect_list(
         &self,
@@ -2529,18 +2494,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Find one exact label, swiping at most max_swipes times (default 1, \
-        max 5) when it is not on screen. Stops AT ONCE — no further swipe — when the label \
-        is ambiguous (several on-screen matches: `candidates` with index and frame), covered \
-        by another control, or not drawn. Found: `target` (index, kind, frame) plus a \
-        `snapshot` for phone_tap_element. Not found: on-screen labels containing the text \
-        as `candidates`. No screenshot is taken; absence after the budget is not proof — \
-        look at the screen before swiping further. Optional `snapshot` (from a read of the \
-        target app; never filled in for you): a known foreground app mismatch refuses before \
-        any swipe (app_changed). Setup may already have affected the device. Stops when ownership \
-        or privacy authorization changes and withholds observations. swipes_confirmed counts Native ACKs, \
-        not displacement; swipes_uncertain means no ACK and must not be replayed automatically. Requires \
-        phone_status drivable=true."
+        description = "Find one exact label, swiping at most max_swipes (default 1, max 5) when it is off screen. \
+        Stops at once — no further swipe — when the label is ambiguous (candidates with index and \
+        frame), covered or not drawn. Found: `target` plus a `snapshot` for phone_tap_element; not \
+        found: on-screen labels containing the text as `candidates`. Absence after the budget is not \
+        proof; look before swiping on. Optional `snapshot` from a read of the target app refuses on \
+        app change. swipes_uncertain: never replay."
     )]
     async fn phone_scroll_find(
         &self,
@@ -2561,16 +2520,12 @@ impl PhoneHandler {
             idempotent_hint = true,
             open_world_hint = false,
         ),
-        description = "Keep the phone for a bounded human-in-the-loop pause inside the \
-        current user-requested task (the operator types a PIN, approves a prompt, \
-        fetches a code): the idle watchdog will not release it for `secs` seconds \
-        (0 clears the hold; max 14400). When the person signs in (passcode, Face ID, \
-        a code), pass private=true: the screen is not read or streamed until you clear \
-        the hold; pass private=true again when extending it, since a hold without it \
-        lifts the privacy. Not for initialization, health checks, or \
-        keeping the phone ready; clear it when the step is done. Fails with \
-        device_release_in_progress if the daemon is already releasing, and with \
-        phone_owned if another session holds the phone lease."
+        description = "Keep the phone through a bounded human-in-the-loop pause inside the current task (a PIN, a \
+        prompt, a code): the idle watchdog will not release it for `secs` seconds (0 clears; max \
+        14400). When the person signs in (passcode, Face ID, a code) pass private=true: the screen \
+        is not read or streamed until the hold is cleared; pass private=true again when extending, a \
+        hold without it lifts the privacy. Not for initialization, health checks or keeping the \
+        phone ready; clear it when done."
     )]
     async fn phone_hold(&self, Parameters(params): Parameters<HoldParams>) -> CallToolResult {
         match self.daemon.hold(params.secs, params.private.unwrap_or(false)).await {
@@ -2586,14 +2541,12 @@ impl PhoneHandler {
             idempotent_hint = true,
             open_world_hint = false,
         ),
-        description = "Release this session's phone lease when its task ends, so another session can drive immediately. \
-        It also frees the phone: a daemon-managed runner is stopped right away, so the phone leaves automation \
-        mode, unless a live viewer, an active phone_hold or a recording keeps it (IPHONE_USE_TASK_END_RELEASE=0 \
-        keeps the runner until the idle window); the next phone tool brings it back. \
-        Unlike phone_hold(secs=0), this gives up ownership rather than merely clearing a pause. It sends no \
-        phone input and returns ok with owner=null; releasing an already-unowned phone succeeds. A different \
-        session's active lease returns phone_owned and is never taken over. Authentication/transport \
-        failures are errors; check phone_status.owner before assuming the lease was released."
+        description = "Release this session's phone lease when its task ends so another session can drive. Also \
+        frees the phone: a daemon-managed runner stops at once (the phone leaves automation mode) \
+        unless a live viewer, an active phone_hold or a recording keeps it; the next phone tool \
+        brings it back. Unlike phone_hold(secs=0) this gives up ownership. Sends no input, returns \
+        owner=null; releasing an unowned phone succeeds; another session's lease returns phone_owned \
+        and is never taken over."
     )]
     async fn phone_release_owner(&self) -> CallToolResult {
         // A released lease is a run boundary.
@@ -2611,16 +2564,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Log the app on screen in with the user's OWN account from their password \
-        vault (bitwarden-use on the Mac). The daemon reads the vault entry and types it into the \
-        phone, so no password or username passes through this conversation. Use it when an app \
-        shows its login page during a task the user asked for. The entry is matched to the app; \
-        when several match, the answer lists their names: ask the user, then pass `item` (and \
-        `user` when names repeat). Existing-account login only: never sign-up, password changes \
-        or payment. When the answer has needs_code, the app sent a verification code: call again \
-        with code_via (sms or mail) and code_from (the sender) once it has arrived; at most two \
-        code requests per login. A push approval on another device needs the user. Read the \
-        screen afterwards to confirm the login."
+        description = "Log the app on screen in with the user's OWN account from their password vault \
+        (bitwarden-use on the Mac): the daemon reads the entry and types it, so no credential passes \
+        through this conversation. Use when an app shows its login page during the user's task. \
+        Several matching entries: the answer lists their names; ask the user, then pass item (and \
+        user). Existing accounts only — never sign-up, password change or payment. needs_code: call \
+        again with code_via (sms|mail) and code_from (max two)."
     )]
     async fn phone_login(&self, Parameters(params): Parameters<LoginParams>) -> CallToolResult {
         let (path, body) = match &params.code_via {
@@ -2653,13 +2602,12 @@ impl PhoneHandler {
 
     #[tool(
         annotations(read_only_hint = true, open_world_hint = false),
-        description = "Find installed deterministic per-app flows before exploring a task: a matching phone_flow_run can \
-        replay it without model decisions or screenshots. Filters category, app and verified combine; app is \
-        a registry app directory or bundle id, not a display-name search. Compact rows report id, \
-        description, inputs, risk and compatibility with this phone's app version; detail=true returns full \
-        JSON. verified means a recorded hardware run, not a guarantee for every current version. Use \
-        phone_flow_info to inspect effects before running. An empty store needs phone_flow_update once; a \
-        filter with no matches is not proof that the whole store is empty."
+        description = "Installed deterministic per-app flows — check before exploring a task: phone_flow_run \
+        replays one without model decisions or screenshots. Filters category, app (registry app dir \
+        or bundle id, not a display name) and verified combine. Rows: id, description, inputs, risk, \
+        compat with this phone's app version; detail=true for full JSON. verified = a recorded \
+        hardware run, not a guarantee. phone_flow_info shows effects. An empty store needs \
+        phone_flow_update once; a filter miss ≠ empty store."
     )]
     async fn phone_flow_list(
         &self,
@@ -2727,20 +2675,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Run one flow exactly once — an installed registry id, or a flow file \
-        path (*.json, e.g. a phone_flow_draft you are proving before publishing). A flow \
-        that declares `outputs` returns what it read as top-level `outputs` (e.g. today's \
-        steps); verify=true also checks their shape against the recorded fixture. A \
-        read_only/navigation flow that misses an element runs its other-language variant \
-        once (`fallback_from` says so): \
-        the daemon validates the whole sequence, holds one control lock, and stops at \
-        the first failed step. The happy path costs one tool call and zero screenshots. \
-        Requires phone_status drivable=true. Pass the flow's declared inputs; a flow \
-        declared risk=side_effect is refused unless confirm=true; a flow whose compat is broken or \
-        incompatible for the installed app version is refused unless force=true. The result reports \
-        completed/applied counts and the failed step; retry_safe=false means DO NOT \
-        replay — inspect phone_elements, repair the flow, do not guess. Unverified flows \
-        (verified=false in phone_flow_list) may need a checkpoint screenshot afterwards."
+        description = "Run one flow exactly once: an installed registry id or a flow file (*.json, e.g. a draft \
+        being proved). Pass its declared inputs; risk=side_effect needs confirm=true; compat \
+        broken/incompatible for the installed app version needs force=true. Declared `outputs` come \
+        back top-level (verify=true checks them). One lock, whole-sequence validation, stops at the \
+        first failed step; a read_only flow missing an element retries its other-language variant. \
+        retry_safe=false: DO NOT replay, repair the flow."
     )]
     async fn phone_flow_run(
         &self,
@@ -2885,14 +2825,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Hand ONE whole goal to a fast on-phone agent instead of driving it step by \
-        step: TypeSafe's Jev picks each next operation and target from the screen's element table \
-        (~1–2 s per step instead of a model turn), a small LLM types field values. Use it for a \
-        clear multi-step goal with no saved flow (check phone_flow_list first). It stops with \
-        status done / blocked / max_steps and the step history; it answers BLOCKED rather than \
-        send, pay, delete or share anything the goal did not explicitly ask for — still confirm \
-        such goals with the user first. Verify the end screen yourself. Needs TYPESAFE_API_KEY \
-        (or ~/.config/typesafe/key) and, for typing, TEXT_MODEL_API_KEY (or ~/.config/openrouter/key)."
+        description = "Hand ONE whole goal to the fast on-phone agent (TypeSafe Jev picks each step from the \
+        element table in ~1–2 s; a small LLM types values). For a clear multi-step goal with no \
+        saved flow (check phone_flow_list first). Returns status done|blocked|max_steps with the \
+        step history; it answers BLOCKED rather than send, pay, delete or share anything the goal \
+        did not ask for — still confirm such goals with the user and verify the end screen. Needs \
+        TYPESAFE_API_KEY (+TEXT_MODEL_API_KEY to type)."
     )]
     async fn phone_jev_run(
         &self,
@@ -2920,15 +2858,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = false,
         ),
-        description = "Turn what you just did on the phone into a flow. The daemon records \
-        every action it applied in the current app (single actions and phone_run_steps \
-        batches, not flow runs); this returns that trail as a flow v1 document (snapshot \
-        taps become label/identifier locators, typed text becomes named inputs and is never \
-        included) plus a `todo` list of what to fix. Call it when a response carried \
-        `flow_suggestion`, or after any multi-step task with no matching flow — but ASK THE \
-        USER before saving. With save_as, the draft is written to that new file and \
-        validated; fix the todo items, prove it with phone_flow_run(id=<file>), then publish \
-        only with the user's OK."
+        description = "Turn what you just did on the phone into a flow: the daemon's trail of applied actions in \
+        the current app (not flow runs) as a flow v1 document — snapshot taps become \
+        label/identifier locators, typed text becomes named inputs and is never included — plus a \
+        `todo` list. Call it on `flow_suggestion` or after a multi-step task with no flow, but ASK \
+        THE USER before saving. save_as writes and validates the file; fix the todos, prove it with \
+        phone_flow_run, publish only with the user's OK."
     )]
     async fn phone_flow_draft(
         &self,
@@ -2974,13 +2909,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Publish a working flow to the official registry through the user's GitHub CLI login: forks if \
-        needed, writes the flow and any new app.json, rebuilds index.json, pushes a branch and opens a \
-        public pull request. Requires confirm=true only after the user agrees to that publication. First \
-        create a draft with phone_flow_draft and prove it with phone_flow_run; use phone_flow_report to \
-        report an existing flow problem. Put device/iOS/date in verified_on; unverified flows open a draft \
-        PR. source is a local file or installed flow id; aliases are foreground-app labels by language. \
-        Returns id, repo, branch, head and pr_url; inspect the URL before retrying a failed publication."
+        description = "Publish a working flow to the official registry through the user's GitHub CLI: fork if \
+        needed, write the flow and any new app.json, rebuild index.json, push a branch, open a \
+        public PR. confirm=true only after the user agreed to that publication. Draft with \
+        phone_flow_draft and prove with phone_flow_run first; phone_flow_report is for problems in \
+        existing flows. verified_on takes device/iOS/date; unverified flows open a draft PR. Returns \
+        id, repo, branch, head, pr_url; inspect it before retrying."
     )]
     async fn phone_flow_publish(
         &self,
@@ -3125,13 +3059,12 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "Capture and read the paired phone's live system log for app debugging; use phone_crashes for saved \
-        crash reports instead. Start capture, reproduce the issue, then read (the default); stop releases \
-        the relay, while clear discards the in-memory buffer. Requires a reachable, paired device; \
-        connection/auth failures are errors, not an empty log. Capture self-stops after 15 minutes without \
-        reads. Filters apply to read results; pass the returned next cursor as since for incremental reads. \
-        Output lines are #seq time process[pid] level: message; error includes faults. Logs can contain \
-        private app data: collect only what the task needs."
+        description = "Capture and read the paired phone's live system log for app debugging (phone_crashes for \
+        saved crash reports). action: start, then reproduce, then read (default; filters \
+        process/contains/level, pass the returned next as since); stop releases the relay, clear \
+        drops the buffer. Connection/auth failures are errors, not an empty log. Capture stops \
+        itself after 15 min without reads. Lines: #seq time process[pid] level: message. Logs may \
+        hold private data: collect only what the task needs."
     )]
     async fn phone_logs(&self, Parameters(params): Parameters<LogsParams>) -> CallToolResult {
         let filter = crate::device::LogsFilter {
@@ -3377,6 +3310,58 @@ fn slim_schema(value: &mut serde_json::Value) {
             }) {
                 map.remove("format");
             }
+            // `Option<T>` comes out as `"type":[T,"null"],"default":null`: an
+            // omitted property already means none, so the null arm and the
+            // null default only cost bytes (58 and 114 times over tools/list).
+            if map.get("default").is_some_and(serde_json::Value::is_null) {
+                map.remove("default");
+            }
+            // `deny_unknown_fields` is enforced by the server on every call,
+            // with an error naming the field; stating it 63 times in the
+            // listing only costs bytes. A `const` already fixes the type.
+            if map.get("additionalProperties") == Some(&serde_json::Value::Bool(false)) {
+                map.remove("additionalProperties");
+            }
+            if map.contains_key("const") {
+                map.remove("type");
+            }
+            if let Some(serde_json::Value::Array(types)) = map.get("type") {
+                let kept: Vec<_> = types
+                    .iter()
+                    .filter(|t| t.as_str() != Some("null"))
+                    .cloned()
+                    .collect();
+                if kept.len() == 1 && kept.len() < types.len() {
+                    map.insert("type".into(), kept.into_iter().next().unwrap());
+                }
+            }
+            // `Option<Struct>` is `anyOf:[{$ref},{type:null}]`: keep the ref
+            // (its siblings, such as the description, stay).
+            let inline = match map.get("anyOf") {
+                Some(serde_json::Value::Array(arms)) if arms.len() == 2 => {
+                    let mut kept = arms.iter().filter(|arm| {
+                        arm.get("type").and_then(serde_json::Value::as_str) != Some("null")
+                    });
+                    match (kept.next(), kept.next()) {
+                        (Some(serde_json::Value::Object(arm)), None) => Some(arm.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some(arm) = inline {
+                map.remove("anyOf");
+                for (key, value) in arm {
+                    map.entry(key).or_insert(value);
+                }
+            }
+            // A doc comment's fenced example (a Rust doctest on a shared core
+            // type) is for the crate's reader, not the model.
+            if let Some(serde_json::Value::String(text)) = map.get_mut("description") {
+                if text.contains("```") {
+                    *text = strip_code_fences(text);
+                }
+            }
             for (key, child) in map.iter_mut() {
                 if key == "properties" || key == "$defs" || key == "definitions" {
                     if let serde_json::Value::Object(props) = child {
@@ -3394,14 +3379,113 @@ fn slim_schema(value: &mut serde_json::Value) {
     }
 }
 
-/// `tools/list` with every input schema slimmed (see [`slim_schema`]).
+/// `text` without its fenced code blocks, surrounding blank lines collapsed.
+fn strip_code_fences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("```") {
+        out.push_str(&rest[..start]);
+        match rest[start + 3..].find("```") {
+            Some(end) => rest = &rest[start + 3 + end + 3..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.split("\n\n")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Fewest copies, and smallest copy, worth a `$defs` entry: a `$ref` costs
+/// about 27 bytes, so three 40-byte copies already come out ahead.
+const HOIST_MIN_COPIES: usize = 3;
+const HOIST_MIN_BYTES: usize = 40;
+
+/// Property schemas repeated verbatim across one tool's schema (every
+/// `phone_run_steps` kind states `after_ms` the same way) are stated once
+/// under `$defs` and referenced from each place. A property whose name is
+/// already a definition is left alone.
+fn hoist_repeated_properties(root: &mut serde_json::Map<String, serde_json::Value>) {
+    fn visit(value: &mut serde_json::Value, f: &mut dyn FnMut(&str, &mut serde_json::Value)) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map.iter_mut() {
+                    if key == "properties" {
+                        if let serde_json::Value::Object(props) = child {
+                            for (name, schema) in props.iter_mut() {
+                                f(name, schema);
+                                visit(schema, f);
+                            }
+                        }
+                    } else {
+                        visit(child, f);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|item| visit(item, f)),
+            _ => {}
+        }
+    }
+    let mut counts: std::collections::BTreeMap<(String, String), usize> = Default::default();
+    let mut whole = serde_json::Value::Object(std::mem::take(root));
+    visit(&mut whole, &mut |name, schema| {
+        if schema.is_object() && schema.get("$ref").is_none() {
+            let canonical = schema.to_string();
+            if canonical.len() >= HOIST_MIN_BYTES {
+                *counts.entry((name.to_string(), canonical)).or_default() += 1;
+            }
+        }
+    });
+    let existing: std::collections::BTreeSet<String> = whole
+        .get("$defs")
+        .and_then(serde_json::Value::as_object)
+        .map(|defs| defs.keys().cloned().collect())
+        .unwrap_or_default();
+    let mut hoisted: std::collections::BTreeMap<String, (String, serde_json::Value)> = Default::default();
+    for ((name, canonical), copies) in counts {
+        if copies >= HOIST_MIN_COPIES && !existing.contains(&name) && !hoisted.contains_key(&name) {
+            let schema = serde_json::from_str(&canonical).expect("canonical schema");
+            hoisted.insert(name, (canonical, schema));
+        }
+    }
+    if !hoisted.is_empty() {
+        visit(&mut whole, &mut |name, schema| {
+            let Some((canonical, _)) = hoisted.get(name) else { return };
+            let rendered = schema.to_string();
+            if rendered == *canonical {
+                *schema = serde_json::json!({ "$ref": format!("#/$defs/{name}") });
+            }
+        });
+        let defs = whole
+            .as_object_mut()
+            .unwrap()
+            .entry("$defs")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(defs) = defs.as_object_mut() {
+            for (name, (_, schema)) in hoisted {
+                defs.insert(name, schema);
+            }
+        }
+    }
+    if let serde_json::Value::Object(map) = whole {
+        *root = map;
+    }
+}
+
+/// `tools/list` with every input schema slimmed (see [`slim_schema`] and
+/// [`hoist_repeated_properties`]).
 fn slim_tools(tools: Vec<rmcp::model::Tool>) -> Vec<rmcp::model::Tool> {
     tools
         .into_iter()
         .map(|mut tool| {
             let mut schema = serde_json::Value::Object((*tool.input_schema).clone());
             slim_schema(&mut schema);
-            if let serde_json::Value::Object(map) = schema {
+            if let serde_json::Value::Object(mut map) = schema {
+                hoist_repeated_properties(&mut map);
                 tool.input_schema = std::sync::Arc::new(map);
             }
             tool
@@ -3458,8 +3542,10 @@ fn listed_tools(profile: &ToolProfile) -> Vec<rmcp::model::Tool> {
                 let mut schema = (*tool.input_schema).clone();
                 let properties = schema.entry("properties").or_insert_with(|| serde_json::json!({}));
                 if let Some(properties) = properties.as_object_mut() {
+                    // Short on purpose: it is repeated on 42 tools; the
+                    // server instructions explain it once.
                     properties.insert("instance".into(), serde_json::json!({"type":"string",
-                        "description":"Installed local instance name, such as i13 or default. Omit to use the configured daemon. No fallback on failure."}));
+                        "description":"daemon instance name"}));
                 }
                 tool.input_schema = std::sync::Arc::new(schema);
             }
@@ -3477,19 +3563,33 @@ pub(crate) fn tool_count() -> usize {
 
 /// Which tools this server lists and accepts (`IPHONE_USE_MCP_TOOLS`).
 ///
-/// `all` (the default) is the whole surface; `readonly` keeps the tools
+/// `all` (the default) is the whole surface; `core` is everything but the
+/// developer tools ([`DEVELOPER_TOOLS`]); `readonly` keeps the tools
 /// annotated `read_only_hint = true` (they never act on the phone); a comma
 /// list is an explicit allowlist of tool names. A hidden tool is neither
 /// listed nor callable: a call is refused with a message naming the setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolProfile {
     All,
+    Core,
     ReadOnly,
     Allow(std::collections::BTreeSet<String>),
 }
 
 /// The environment variable that selects a [`ToolProfile`].
 const TOOLS_ENV: &str = "IPHONE_USE_MCP_TOOLS";
+
+/// Tools for app debugging and device management rather than driving the
+/// phone; `core` leaves them out so an ordinary session does not pay for
+/// their schemas.
+pub(crate) const DEVELOPER_TOOLS: [&str; 6] = [
+    "phone_app_notes",
+    "phone_crashes",
+    "phone_install_app",
+    "phone_logs",
+    "phone_record",
+    "phone_set_location",
+];
 
 impl ToolProfile {
     /// Read `IPHONE_USE_MCP_TOOLS`; problems with it go to stderr (stdout is
@@ -3510,6 +3610,7 @@ impl ToolProfile {
         let raw = raw.map(str::trim).unwrap_or_default();
         match raw.to_ascii_lowercase().as_str() {
             "" | "all" => return (Self::All, Vec::new()),
+            "core" => return (Self::Core, Vec::new()),
             "readonly" | "read-only" | "read_only" => return (Self::ReadOnly, Vec::new()),
             _ => {}
         }
@@ -3527,13 +3628,17 @@ impl ToolProfile {
                 warnings.push(format!("{TOOLS_ENV}: unknown tool {name:?} ignored"));
             }
         }
+        // Only the allowlist needs this: the panel (phone_screen) fetches
+        // its frames through phone_screen_frame, so an operator who lists
+        // phone_screen gets a working panel without knowing about the frame
+        // tool. `readonly` includes it on its own merits (read_only_hint).
         if allowed.contains(crate::screen::SCREEN_TOOL) {
             allowed.insert(crate::screen::FRAME_TOOL.to_string());
         }
         if allowed.is_empty() {
             warnings.push(format!(
                 "{TOOLS_ENV}={raw:?} names no known tool; no tools are exposed \
-                 (use all, readonly, or a comma list of tool names)"
+                 (use all, core, readonly, or a comma list of tool names)"
             ));
         }
         (Self::Allow(allowed), warnings)
@@ -3542,6 +3647,7 @@ impl ToolProfile {
     fn allows(&self, tool: &rmcp::model::Tool) -> bool {
         match self {
             Self::All => true,
+            Self::Core => !DEVELOPER_TOOLS.contains(&tool.name.as_ref()),
             Self::ReadOnly => {
                 // The handler refuses save_as in this profile; discovery below
                 // advertises only the side-effect-free draft operation.
@@ -3563,6 +3669,10 @@ impl ToolProfile {
         }
         let why = match self {
             Self::All => return None,
+            Self::Core => format!(
+                "{TOOLS_ENV}=core leaves out the developer tools ({})",
+                DEVELOPER_TOOLS.join(", ")
+            ),
             Self::ReadOnly => format!(
                 "{TOOLS_ENV}=readonly exposes only read-only tools (observation, lookup, flow \
                  list/info/draft)"
@@ -3574,8 +3684,8 @@ impl ToolProfile {
         };
         Some(CallToolResult::error(vec![Content::text(format!(
             "{name} is not available in this session: {why}. Nothing was sent to the phone. \
-             The operator can change {TOOLS_ENV} in the MCP server's environment (all, readonly, \
-             or a comma list of tool names)."
+             The operator can change {TOOLS_ENV} in the MCP server's environment (all, core, \
+             readonly, or a comma list of tool names)."
         ))]))
     }
 }
@@ -3849,7 +3959,8 @@ impl ServerHandler for PhoneHandler {
             .with_instructions(
                 "Drive a real iPhone. The loop:\n\
                  1. If the user names a phone or there are multiple installed phones, use phone_instances \
-                 and pass the chosen instance on every phone_* call. Omitted instance describes only the configured daemon, \
+                 and pass the chosen instance (an installed daemon instance name such as i13 or default) on every \
+                 phone_* call. Omitted instance describes only the configured daemon, \
                  never all phones. Explicit unavailable instances fail without fallback. \
                  phone_status — act only when drivable=true, with one exception: released=true (freed after the last task) is \
                  brought back by the next phone tool itself (elements, tap, run_steps, …), which waits for it and answers \
@@ -5840,6 +5951,58 @@ mod tests {
             .is_some());
     }
 
+    /// `core` is the whole driving surface minus the six developer tools;
+    /// a hidden one is refused with a message that names the setting.
+    #[test]
+    fn the_core_profile_hides_only_the_developer_tools() {
+        let (profile, warnings) = ToolProfile::parse(Some("core"));
+        assert_eq!(profile, ToolProfile::Core);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let all = listed_names(&ToolProfile::All);
+        let core = listed_names(&profile);
+        assert_eq!(core.len(), all.len() - DEVELOPER_TOOLS.len());
+        for name in DEVELOPER_TOOLS {
+            assert!(all.contains(&name.to_string()), "{name} is not a tool");
+            assert!(!core.contains(&name.to_string()), "{name} listed under core");
+            let text = text_of(&profile.refusal(name).expect("hidden"));
+            assert!(text.contains("IPHONE_USE_MCP_TOOLS=core"), "{text}");
+        }
+        for name in ["phone_run_steps", "phone_screenshot", "phone_flow_publish", "phone_screen_frame"] {
+            assert!(core.contains(&name.to_string()), "{name} missing from core");
+            assert!(profile.refusal(name).is_none());
+        }
+    }
+
+    /// The generated schema's `Option<T>` noise and repeated property
+    /// objects are gone from what a client is handed; the `instance`
+    /// parameter is short.
+    #[test]
+    fn listed_schemas_are_compact() {
+        let tools = listed_tools(&ToolProfile::All);
+        let wire = serde_json::to_string(&tools).unwrap();
+        assert!(!wire.contains("\"default\":null"), "null defaults survived");
+        assert!(!wire.contains(",\"null\"]"), "nullable type arrays survived");
+        assert!(!wire.contains("```"), "a doctest fence survived");
+        let run_steps = tools.iter().find(|t| t.name == "phone_run_steps").unwrap();
+        let defs = run_steps.input_schema["$defs"].as_object().unwrap();
+        assert!(defs.contains_key("after_ms"), "after_ms was not hoisted: {:?}", defs.keys());
+        let text = serde_json::to_string(&run_steps.input_schema).unwrap();
+        assert!(text.matches("\"$ref\":\"#/$defs/after_ms\"").count() >= 10, "{text}");
+        let tap = tools.iter().find(|t| t.name == "phone_tap").unwrap();
+        assert_eq!(tap.input_schema["properties"]["instance"]["description"], "daemon instance name");
+        assert_eq!(tap.input_schema["properties"]["observe"]["type"], "boolean");
+        let elements = tools.iter().find(|t| t.name == "phone_elements").unwrap();
+        // `Option<ElementSelector>` keeps its `$ref` and description, not the null arm.
+        let selector = &elements.input_schema["properties"]["selector"];
+        assert!(selector.get("anyOf").is_none(), "{selector}");
+        assert_eq!(selector["$ref"], "#/$defs/ElementSelector");
+        assert!(selector["description"].is_string());
+        for tool in &tools {
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(description.len() <= 600, "{} description is {} chars", tool.name, description.len());
+        }
+    }
+
     #[test]
     fn phone_elements_passes_query_and_limit_through() {
         use crate::client::elements_path;
@@ -6901,7 +7064,11 @@ mod tests {
         let object=selector.get("anyOf").and_then(|a|a.as_array()).and_then(|a|a.iter()
             .map(|v|resolve(&schema,v)).find(|v|v.get("type")==Some(&serde_json::json!("object")))).unwrap_or(selector);
         assert_eq!(object["type"],"object");
-        assert_eq!(object["additionalProperties"],false);
+        // The listing drops `additionalProperties:false` (serde enforces it,
+        // as the refusals above show); the generated schema still states it.
+        assert!(object.get("additionalProperties").is_none(),"{object}");
+        let raw=serde_json::to_value(rmcp::schemars::schema_for!(iu_core::element_selector::ElementSelector)).unwrap();
+        assert_eq!(raw["additionalProperties"],false,"{raw}");
         assert!(object["properties"]["enabled"].to_string().contains("boolean"));
         assert!(object["properties"]["value_present"].to_string().contains("boolean"));
         assert!(object["properties"]["name"].to_string().contains("string"));

@@ -2,7 +2,7 @@
 //! sent as HTTP credentials. Requests/results are authenticated ciphertext.
 use crate::{open_message, seal_message};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -129,7 +129,7 @@ pub fn grant(
         return Err("no_installed_sites_in_scope");
     }
     let mut key = [0; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     let id = hex::encode(Sha256::digest(key))[..24].to_string();
     let mut scopes = read_scopes(file)?;
     scopes["scopes"].as_array_mut().ok_or("invalid_scope_file")?.push(json!({"id":id,"key":STANDARD.encode(key),"profile":profile,"domains":domains,"writes":writes,"pins":pins,"expires":now()+7*86400}));

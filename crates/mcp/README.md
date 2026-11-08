@@ -36,7 +36,7 @@ cargo build --release -p iphone-use-mcp
 |---|---|---|
 | `IPHONE_USE_URL` | `http://127.0.0.1:44321` | Base URL of the daemon |
 | `IPHONE_USE_TOKEN` | _(none)_ | Bearer token / password (omit for open-mode daemons) |
-| `IPHONE_USE_MCP_TOOLS` | `all` | Which tools are listed and callable: `all`, `readonly`, or a comma list of tool names (see [Tool profiles](#tool-profiles-and-annotations)) |
+| `IPHONE_USE_MCP_TOOLS` | `all` | Which tools are listed and callable: `all`, `core`, `readonly`, or a comma list of tool names (see [Tool profiles](#tool-profiles-and-annotations)) |
 | `IPHONE_USE_MCP_TOKEN` | _(none)_ | With `--listen`: the bearer token HTTP clients must send; required for a non-loopback address (see [MCP over HTTP](#mcp-over-http)) |
 | `IPHONE_USE_MCP_PREWARM` | `0` | Set `1` to opt into phone pre-warming on MCP startup/status. Discovery does not contact the daemon by default. |
 
@@ -371,6 +371,7 @@ handler. Neither mode sends phone input.
 | Value | Listed and callable |
 |---|---|
 | `all` (default) | every tool |
+| `core` | every tool except the six developer tools (`phone_logs`, `phone_crashes`, `phone_record`, `phone_install_app`, `phone_set_location`, `phone_app_notes`): the whole driving surface, minus the schemas an ordinary session never uses |
 | `readonly` | the read-only set above plus `phone_flow_draft` without `save_as`: observation and draft reads, with no phone actions or file writes |
 | `phone_status,phone_elements,phone_tap` | exactly the named tools (`phone_screen` brings `phone_screen_frame` along for the panel); unknown names are reported on stderr and ignored |
 

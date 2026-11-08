@@ -59,6 +59,31 @@ server. iphone-use is a macOS app with a daemon, not an npm or pip package: ther
 6. If the `phone_*` tools are not loaded in the current chat, tell the user to start a new chat (or
    restart the client) so it picks up the server.
 
+## Options
+
+- **A second phone.** One daemon drives one phone. For another iPhone, install a named instance
+   and leave the default alone: `curl -fsSL …/install.sh | sh -s -- --instance lab --udid <UDID>`
+   (UDID from `xcrun devicectl list devices`), then `iphone-use setup --instance lab`. The
+   instance gets its own daemon port and token; the installer prints them. Point a client at it
+   with `IPHONE_USE_INSTANCE=lab` in the MCP server's `env`, or pass `instance: "lab"` on each
+   `phone_*` call (`phone_instances` lists them). `doctor`, `status`, `metrics`, `test` and
+   `schedule` take `--instance lab`.
+- **Control from another network.** `iphone-use remote tailscale on` joins the daemon to the
+   user's Tailscale tailnet as its own node; `iphone-use remote cloudflare on` publishes it through
+   a Cloudflare quick tunnel (no account; `--token-file <file> --url https://phone.example.com` for a
+   named tunnel on the user's domain). `iphone-use remote status` shows the addresses, `iphone-use
+   remote pair` prints a one-time QR code and link for the phone app. Both still need the daemon
+   password and survive upgrades. Only the user can sign in to Tailscale or Cloudflare; stop and
+   ask them.
+- **Fewer tools.** `IPHONE_USE_MCP_TOOLS` in the server's `env` narrows what the model sees:
+   `core` (everything except the developer tools: logs, crashes, recording, app install,
+   simulated location, app notes), `readonly` (observation and lookup only; nothing acts on the
+   phone) or a comma list of tool names. A hidden tool is neither listed nor callable.
+- **MCP over HTTP.** `iphone-use-mcp --listen 127.0.0.1:PORT` serves MCP over HTTP for a client
+   on the same Mac. For another address set `IPHONE_USE_MCP_TOKEN` (required off loopback) and
+   have the client send it as `Authorization: Bearer <token>`; prefer an authenticated tunnel over
+   exposing the port.
+
 ## Check that it works
 
 - `iphone-use status` says whether the phone is ready for agents.

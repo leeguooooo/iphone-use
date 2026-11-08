@@ -4,6 +4,7 @@
 extern crate std as core;
 
 pub mod auth;
+pub mod clock;
 pub mod control;
 pub mod drag;
 pub mod home_layout;

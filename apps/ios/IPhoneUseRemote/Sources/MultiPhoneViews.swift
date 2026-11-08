@@ -208,6 +208,13 @@ struct TilePicture: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             LiveVideo(session: session)
+            // Stills (a buffered tunnel) and MJPEG never reach the video
+            // layer; show the last one here, as the full screen does.
+            if let still = session.mjpegImage {
+                Image(uiImage: still).resizable().scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
             let p = session.presentation()
             // The same state the full screen shows, in a tile's words.
             if p.placement == .cover || !session.videoLive {

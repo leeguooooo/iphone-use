@@ -130,6 +130,20 @@ final class DeliveryOutcomeTests: XCTestCase {
     }
 }
 
+final class StillsPaceTests: XCTestCase {
+    /// On a buffered tunnel the full screen polls stills briskly; a grid
+    /// tile asks for a small picture every couple of seconds, so a grid of
+    /// phones does not hammer the tunnel at several requests per second each.
+    func testTilePollsSlowerAndSmallerThanFullScreen() {
+        let full = DeviceSession.stillsPace(for: .full)
+        let tile = DeviceSession.stillsPace(for: .tile)
+        XCTAssertEqual(full.intervalMs, 300)
+        XCTAssertEqual(full.maxSide, 800)
+        XCTAssertGreaterThanOrEqual(tile.intervalMs, 2000)
+        XCTAssertLessThan(tile.maxSide, full.maxSide)
+    }
+}
+
 final class PhoneStatusOwnerTests: XCTestCase {
     private func status(_ json: String) throws -> PhoneStatus {
         try JSONDecoder().decode(PhoneStatus.self, from: Data(json.utf8))

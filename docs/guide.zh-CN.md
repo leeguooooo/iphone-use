@@ -151,7 +151,52 @@ daemon 每天检查一次 GitHub，在 `/agent/status` 里报 `version` / `lates
 
 ## 用原生 iOS App 操作手机
 
-`apps/ios` 是原生 SwiftUI App（最低部署版本 iOS 15）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码，所以手机锁着时 App 几秒内就会提示「请解锁」，解锁后马上连上。遇到 App 禁止截屏的界面（支付、银行类 App），画面不再是一片白，而是显示守护进程按控件树画的线框图。安装：App 不上 App Store，用你自己的签名团队（就是 `iphone-use setup` 给 runner 用的那个）编译安装：运行 `iphone-use setup-app`。它会下载本版本的 App 源码（`iphone-use-app.tar.gz`，校验 SHA-256），用你的团队编译，再用 `devicectl` 装到手机上。付费开发者团队装的是带**本机控制**的完整版：App 里的网络扩展在手机上自己启动 runner，运行时不需要 Mac（iOS 17.4 及以上）；首次配对要插一次 USB 线，`setup-app` 会生成配对记录交给 App，之后在手机上打开 Phone Use › 设置 › 本机控制 › 启用本机控制，并允许添加 VPN 配置。本机控制运行时占用手机的自动化会话，Mac 端 runner 启动不了（会一直等待）。要回到由 Mac 控制，先在 App 里停止本机控制（本机控制 › 停止本机控制），再运行 `iphone-use setup resume`；`iphone-use setup pause` 则是停掉 Mac 端 runner，让本机控制能启动。免费 Apple ID 签不了网络扩展，装的是远程版，只能控制 Mac 托管的手机（用上面的扫码连接）；付费团队也可以用 `--remote-only` 只装远程版。
+`apps/ios` 是原生 SwiftUI App（最低部署版本 iOS 15）。**扫码连接**：在 Mac 上打开 iphone-use 页面，点工具栏的「扫码」，用 App 扫一下就连上（用 iPhone 自带相机扫也行，还能直接在浏览器里控制）。二维码只能用一次、5 分钟内有效；App 会保存一个设备令牌自动续登录，改控制密码会让所有已配对的手机失效。也可以手动填地址和控制密码。App 用系统硬件解码播放 H.264 画面，点击、长按、滑动、按住拖动、输入文字和回主屏幕都发到 `POST /control`，跟网页走同一套接口。被控的那台 iPhone 要保持解锁：iOS 不允许自动化输入锁屏密码，所以手机锁着时 App 几秒内就会提示「请解锁」，解锁后马上连上。遇到 App 禁止截屏的界面（支付、银行类 App），画面不再是一片白，而是显示守护进程按控件树画的线框图。
+
+### 安装 App
+
+App 不上 App Store，用你自己的签名团队（就是 `iphone-use setup` 给 runner 用的那个）编译安装：
+
+```bash
+iphone-use setup-app            # 第二台手机加 --instance <名字>
+```
+
+它会下载本版本的 App 源码（`iphone-use-app.tar.gz`，校验 SHA-256），用你的团队编译，再用 `devicectl` 装到手机上。装到哪个版本取决于团队：
+
+- **付费开发者团队：带本机控制的完整版。** App 里的网络扩展在手机上自己启动 runner，运行时不需要 Mac（iOS 17.4 及以上）。首次配对要插一次 USB 线，`setup-app` 会生成配对记录交给 App；之后在手机上打开 Phone Use › 设置 › 本机控制 › 启用本机控制，并允许添加 VPN 配置。本机控制运行时占用手机的自动化会话，Mac 端 runner 启动不了（会一直等待）。要回到由 Mac 控制，先在 App 里停止本机控制（本机控制 › 停止本机控制），再运行 `iphone-use setup resume`；`iphone-use setup pause` 则是停掉 Mac 端 runner，让本机控制能启动。
+- **免费 Apple ID：远程版。** iOS 不让免费团队签网络扩展，这一版只能控制 Mac 托管的手机（用上面的扫码连接）。付费团队也可以用 `--remote-only` 只装远程版。
+
+`--no-install` 只编译不安装，`--no-pair` 跳过 USB 配对。在仓库里用 `IPHONE_USE_APP_SRC=$PWD iphone-use setup-app` 编译当前检出的源码（需要 `xcodegen`、`scripts/build-browser-session.sh device` 和 `experiments/phone-self-host/launcher/build.sh` 编出的启动库；见 `apps/ios/README.md`）。
+
+## 在任意网络远程控制（Tailscale / Cloudflare Tunnel）
+
+daemon 只在这台 Mac 上监听。要在别的网络（蜂窝、公司、酒店）控制手机，让 daemon 替你开一条隧道。两种方式重装、升级后都还在，也都照样要 daemon 密码。
+
+**Tailscale**（推荐：只有自己的设备能连，端到端加密，实时画面完整）：
+
+```bash
+iphone-use remote tailscale on        # 第一次会打印登录链接，打开登录即可
+```
+
+iphone-use 会像 Rex 那样，以独立设备的身份加入你的 tailnet，设备名是 `iphone-use`（第二台手机是 `iphone-use-<实例名>`）。它靠随包附带的小程序 `iphone-use-tailnet`（基于 Tailscale 的 `tsnet`）跑在 daemon 旁边，这台 Mac 上不用装或登录 Tailscale App。在任何登录了你 Tailscale 的设备上，用浏览器或 Phone Use Remote App 打开 `https://iphone-use.<tailnet>.ts.net`，或 `http://<tailnet IP>:44321`。默认只放行拥有这个节点的 Tailscale 账号的设备；加 `--allow-tailnet-members` 放行 tailnet 里的其他人（他们仍要输密码）。其他选项：`--hostname NAME`；`--auth-key-file FILE` 用一次性 auth key 入网，不走登录链接，key 不能写在命令行上；`--control-url URL` 用于 Headscale。`off` 停止服务但保留登录，`login` 重新给一个登录链接，`logout` 退出登录，`rename NAME` 改设备名。
+
+HTTPS 地址要在 Tailscale 管理后台 › DNS 里打开 **HTTPS Certificates**。没打开时只能用明文地址，浏览器在明文页面上用不了 WebCodecs，画面会退回 MJPEG。
+
+**Cloudflare Tunnel**（对方设备不用装 Tailscale；需要先 `brew install cloudflared`）：
+
+```bash
+iphone-use remote cloudflare on                     # quick tunnel，不用账号
+iphone-use remote cloudflare on --token-file token.txt --url https://phone.example.com
+```
+
+不带 token 时开的是 quick tunnel：随机的 `https://….trycloudflare.com` 地址，daemon 每次重启都会变。Cloudflare 在 quick tunnel 上会把流式响应攒到结束才发，所以那里的实时画面是一张张截图（每秒约两张），点击、输入和 agent 照常可用。要实时视频就用 named tunnel：在 Cloudflare Zero Trust › Networks › Tunnels 新建一条，把一个公网域名指向 `http://localhost:44321`，把 token 存进文件，两个参数一起传。named tunnel 的域名前面加 Cloudflare Access 只适合浏览器使用：App 和 agent 过不了 Access 登录。
+
+之后：
+
+- `iphone-use remote status` 显示开了哪些、地址是什么（脚本用 `--json`）；`/agent/status` 的 `remote` 字段内容相同。
+- `iphone-use remote pair` 打印这个地址的一次性二维码和链接，用你要拿来远程控制的手机或电脑扫。网页上的「扫码」也会把远程地址排在最前面。
+- 别的电脑上的 agent 和 MCP 客户端：`IPHONE_USE_URL=<地址> IPHONE_USE_TOKEN=<daemon 密码或 agent token>`。
+- daemon 没设密码时拒绝开启远程访问。两个小程序的日志在 `~/.iphone-use/remote/`（`tailnet.log`、`cloudflared.log`）；Tailscale 小程序不向 Tailscale 上传日志。
 
 ## Agent API
 
@@ -256,12 +301,13 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
 
 | 分组 | 工具 |
 |---|---|
-| 看 | `phone_status`、`phone_capabilities`（这个版本支持什么，以及此刻能不能用；不唤醒手机、不占租约）、`phone_screenshot`、`phone_elements`（带 `registry` 块，列出当前屏幕上这个 app 已安装的 flow） |
+| 看 | `phone_status`、`phone_capabilities`（这个版本支持什么，以及此刻能不能用；不唤醒手机、不占租约）、`phone_screenshot`、`phone_elements`（带 `registry` 块，列出当前屏幕上这个 app 已安装的 flow）、`phone_read_value`（读一个元素的完整 AX 值，不点、不占租约，给 `value_truncated` 的行用）、`phone_subtree`（只读一个元素的有界子树）、`phone_scroll_find`（找一个精确标签，最多滑 `max_swipes` 次）、`phone_collect_list`（一次调用翻页读完一个列表）、`phone_screen`（在支持 MCP Apps 的客户端里打开实时画面面板；`phone_screen_frame` 是它的帧传输，对模型隐藏）、`phone_instances`（本机装了哪些手机实例及其只读状态；任何调用传 `instance` 选其一）、`phone_apps`（按名字查 app 的 bundle id，不用猜）、`phone_home_layout`（不打开任何东西就读出全部主屏页面、Dock、文件夹和小组件；`backup` / `preview` / `apply` / `restore` 可写） |
 | 动 | `phone_tap`、`phone_tap_element`（绑定快照）、`phone_tap_label`（精确标签唯一）、`phone_scroll`、`phone_type`（中文无损）、`phone_key`、`phone_shortcut`（`home` / `spotlight`）——每个都可选传 `observe` |
 | 批 | `phone_run_steps`：最多 24 步，含 `tap_locator`、`launch_app`、`picker`、`alert`、`perform`（切换开关、调节滑块）、长按 / 多指长按 / 滑动 / 拖动、`wait_for`；`phone_jev_run`：把整个目标交给手机上的快速 agent |
 | 生命周期 | `phone_reconnect`（在已配置的手机上重启设备运行器，不换 UDID）、`phone_hold`、`phone_release_owner`、`phone_login`（在 daemon 内用用户自己的密码库登录 app） |
 | Flow | `phone_flow_list`、`phone_flow_info`、`phone_flow_run`、`phone_flow_draft`、`phone_flow_update`、`phone_flow_publish`、`phone_flow_report` |
-| 统计 | `phone_run_start`、`phone_run_end`（精确统计一次任务的调用） |
+| 统计 | `phone_run_start`、`phone_run_end`（精确统计一次任务的调用）、`phone_run_trace`（`trace=true` 启动的那次运行的脱敏动作时间线）、`phone_metrics`（本客户端 owner 的任务性能汇总） |
+| 设备 | `phone_logs`（抓取并读取手机的实时系统日志）、`phone_crashes`（列出崩溃报告，或按 `name` 读一份）、`phone_record`（把手机屏幕录成 Mac 上的 MP4：开始、做任务、停止）、`phone_install_app`（从 Mac 装 `.ipa` / `.app`，或装一个 https 的 `.ipa` 链接）、`phone_set_location`（给需要定位的 app 模拟 GPS）、`phone_app_notes`（读或改某个 bundle id 的持久备注：导航路径和怪癖） |
 
 `phone_elements` 默认把屏外或未绘制的元素合并成摘要，最多列出 5 个标签。传
 `include_hidden: true` 可逐行查看它们，保留原始索引、标识和值，并标注 `hidden`。
@@ -278,20 +324,48 @@ verb 定义在 `~/.iphone-use/intents-registry.json`（从 [`deploy/intents-regi
 
 整个路径中手指保持按下；Flow 草稿会保留路径和停留时间。原有四坐标写法仍可用。
 
-这些工具的返回通常分为两部分：
+这 43 个工具的返回通常分为两部分：
 
 * **文本块**是写给模型看的精简内容：动作工具执行后稳定下来的变化，`phone_elements` 每个元素一行，批次的结论和结束时的屏幕。批次失败时，文本给出失败的那一步、它的错误、`retry_safe` 和结束时的屏幕。
 * **`structuredContent`** 默认是精简版：只保留程序做分支要用的字段（`ok`、`outcome`、`retry_safe`、`error`、`failed_step`、`snapshot` 等），文本放在 `summary` 里。设 `IPHONE_USE_MCP_STRUCTURED=full` 会给出 daemon 的完整 JSON，设 `off` 则不给结构化内容。
 
 默认用精简版，是因为各个客户端交给模型的部分不一样：Claude Code 在调用成功时只把 `structuredContent` 交给模型，Codex CLI 则两部分都交。
 
-有三个工具例外：`phone_status` 和 `phone_capabilities` 直接返回 JSON，`phone_screenshot` 返回图片。
+有三个工具例外：`phone_status` 和 `phone_capabilities` 直接返回 JSON，`phone_screenshot` 返回图片。`phone_screen` 打开的是面板而不是给模型的回答，`phone_screen_frame` 只给那个面板喂帧。
 
 无法确认结果时，返回会带 `outcome: "unknown"` 和 `retry_safe: false`。判断能否重发一律看显式的 `retry_safe` 布尔值，不要看 `outcome`。完整对照表见 [`crates/mcp/README.md`](../crates/mcp/README.md)。
 
 单步动作工具传 `observe: true`，daemon 会在动作之后观察屏幕稳定下来并把变化一起返回（`settle`、`snapshot`、`delta`）。默认关闭，因为这段等待是动作本身不必付的延迟。`settle.reason` 三态：`stable`、`budget_exhausted`（观察预算用尽，动作本身已经发生）、`observation_failed`（读取链路坏了）；`stale: true` 表示返回的树是上一次成功的读取而不是当前屏幕，`sparse: true` 表示空树或纯容器树，这种树两次相同也不算 stable。
 
 收起键盘、卸载、目标配置仍只走 HTTP。完整 schema 见 [`crates/mcp/README.md`](../crates/mcp/README.md)。
+
+在 MCP server 的 `env` 里设 `IPHONE_USE_MCP_TOOLS` 可以缩小模型看到的工具面：`all`（默认）、`core`（去掉六个开发者工具：`phone_logs`、`phone_crashes`、`phone_record`、`phone_install_app`、`phone_set_location`、`phone_app_notes`）、`readonly`（只有标了只读的工具，外加 `phone_flow_draft` 和 `phone_home_layout`），或者用逗号列出工具名（列了 `phone_screen` 会带上 `phone_screen_frame`）。被隐藏的工具既不列出也不能调用；调用会被拒绝并指出这个设置，请求不会到手机。
+
+### 多指长按与 Jev 读取恢复
+
+`phone_run_steps` 和保存的 flow 支持 `kind:"multi_longpress"`：
+
+```json
+{"kind":"multi_longpress","points":[{"x":0.3,"y":0.5},{"x":0.5,"y":0.5},{"x":0.7,"y":0.5}],"duration_ms":1500}
+```
+
+`points` 包含 2–5 个互不重复的归一化坐标，数组长度就是手指数。
+HTTP `/agent/input` 或 `/agent/actions` 使用 `type:"multi_longpress"`。
+时长默认 1000 ms，范围 1–10000 ms；发送前检查全部坐标，失败时不会降级为单指。
+普通 `longpress` 收到 `fingers:3` 会拒绝执行。协议与批处理已有自动化测试，
+具体 App 能否识别这一手势仍需真机验证。
+
+Jev 遇到 HTTP 504 `runner_source_timeout` 时，会按响应中的
+`retry_after_secs` 等待 1–60 秒，仅重试一次读取，让服务端返回有界树。
+不会重放前一步点击。操作后的读取恢复失败时返回 `status:"blocked"`，
+保留 `history` 和 `last_successful_action`，供后续接手核验。
+
+Jev 收到确认未发送的 `element_occluded`，且当前读屏中键盘可见时，会尝试一次
+`DISMISS_KEYBOARD` 并重新读屏。该动作使用独立的 `keyboard_dismiss_only`，只匹配明确的
+“隐藏键盘”按钮，不按 Done、Return 或 Search；没有这种按钮时返回 blocked。
+旧 daemon 会拒绝这个独立动作，不会忽略保护参数后按下 Search。
+它不清空搜索词、不提交，也不绕过遮挡保护。
+键盘仍在或再次遇到遮挡时返回 blocked；动作结果未知时不触发这条自动恢复路径。
 
 ## Flow 与官方 flow 源
 
@@ -367,6 +441,29 @@ agent 不靠记性去查源，而是被推着走：`phone_elements` 直接列出
 
 ## 运维
 
+### 第二台手机（命名实例）
+
+一个 daemon 管一台手机。要同时控制另一台 iPhone，给它装一个命名实例，默认安装原样不动：
+
+```bash
+./install.sh --instance lab --udid <UDID>      # UDID 用 xcrun devicectl list devices 查
+iphone-use setup --instance lab                # 这台手机插上时安装器运行的就是它
+```
+
+这个实例有自己的一份 app、状态目录（`~/.iphone-use/instances/lab`，runner 编译产物在它的 `runner-build/` 下；`~/.iphone-use/runner` 的源码各实例共用）、launchd 标签（`com.leeguoo.iphone-use.lab`、`com.leeguoo.iphone-use.runner.lab`）、只监听 loopback 的 daemon、agent token 和端口。端口按名字推导并持久化，安装器会打印，之后可以用 `IPHONE_USE_INSTANCE=lab setup-runner.sh instance-context` 查看。签名（团队、bundle id、App Store Connect key）没有单独设置时继承默认实例的 runner supervisor。已被别的实例管着的手机，或者别的实例占着的端口，在改动任何东西之前就会被拒绝。agent 用 `IPHONE_USE_URL=http://127.0.0.1:<端口>` 加这个实例的 `IPHONE_USE_AGENT_TOKEN`（在 `~/Library/LaunchAgents/com.leeguoo.iphone-use.lab.plist` 里）指向它。只卸这一个实例用 `uninstall.sh --instance lab`；还有命名实例在，默认卸载会拒绝。
+
+**几台手机共用一个域名。** 给每个命名实例一个路径：`IPHONE_USE_BASE_PATH=/lab`（运行 `./install.sh --instance lab` 时设置；重装会保留；路径里某一段和 daemon 自己的路由重名，比如 `/agent` 或 `/ix/phone`，会被忽略）。daemon 之后把页面放在 `/lab` 下（`/lab/phone`、`/lab/login`），会话 cookie 只限这个路径，不带前缀的页面请求会转到这里。API 仍在不带前缀的路径上，所以 MCP、iOS App 和只知道端口的局域网客户端照常工作。在隧道里按路径分流，路径原样传过去：
+
+```yaml
+ingress:
+  - hostname: phone.example.com
+    path: ^/lab(/|$)
+    service: http://127.0.0.1:<lab 端口>
+  - hostname: phone.example.com
+    service: http://127.0.0.1:44321        # 默认实例仍在 /
+  - service: http_status:404
+```
+
 ### 模拟器（预览）
 
 设备 runner 也能跑在 iOS 模拟器上：不需要手机、Apple ID 和签名，只需要一台装了 Xcode 和至少一个 iOS 模拟器运行时的 Mac。`iphone-use simulators` 列出模拟器（也可加 `--json`）。`iphone-use simulator start "iPhone 16 Pro"`（也可传 UDID，`--port N` 指定端口）会依次完成以下步骤：
@@ -420,36 +517,106 @@ claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp   # 只�
 iphone-use upgrade    # 或者：curl -fsSL https://raw.githubusercontent.com/leeguooooo/iphone-use/main/install.sh | sh
 ```
 
-安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。已有的配置（`IPHONE_USE_RUNNER_URL`、密码、token、UDID）原样保留。`IPHONE_USE_NO_UPDATE_CHECK=1`（或 `IPHONE_USE_NO_UPDATE_CHECK=1` / `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
+安装器把 release tag 解析成一个确定的 commit，helper 和 skill 都钉在上面；daemon app 取对应 Release asset 并校验 SHA-256；先把 skill 安装到 `~/.agents/skills/iphone-use`、逐字节校验落盘内容和 Claude Code 发现链接，再替换 daemon。skill 失败中止升级；之后 daemon 失败则恢复旧 skill。`IPHONE_USE_SKIP_SKILL=1` 保留现有 skill，这是降级安装，安装器不保证新 daemon 和旧 skill 兼容。已有的配置（`IPHONE_USE_RUNNER_URL`、密码、token、UDID）原样保留。`IPHONE_USE_NO_UPDATE_CHECK=1`（或 `USE_NO_UPDATE_CHECK=1`）关掉每日检查。
 
 安装时保留有效的现有签名，签名无效就用不动 keychain 的 ad-hoc 签名补上；daemon 不持有任何 macOS 授权，换签名不会让什么失效。
 
+### 命令行
+
+除了 `setup`、`doctor`、`status`、`try`、`login`、`upgrade`、`remote`、`setup-app`，`iphone-use` 还有：
+
+| 命令 | 作用 |
+|---|---|
+| `iphone-use files receive\|status\|stop\|result` | 接收用户在手机上明确“存储到文件”进 runner 收件箱的文件；保存完成后再运行 `receive`。需要 Xcode 的 CoreDevice 工具。 |
+| `iphone-use home-layout backup [文件]`、`apply <文件>`、`restore [文件]` | 备份或替换主屏幕布局（icon state plist）；`restore` 不给文件就用最新的自动备份，每次写入先备份被替换的布局，`--dry-run` 只打印预览。需要 `IPHONE_USE_UDID`。 |
+| `iphone-use metrics [--owner <id>] [--json]` | 按运行统计任务指标：HTTP 调用数（不是模型轮次）、批次、观察到的动作、失败和 p50/p95。 |
+| `iphone-use test <suite> …` | 在手机上跑一个 YAML/JSON 测试套件（setup，再逐个 case 跑步骤和断言）；退出码 0 全过，1 有 case 失败，2 套件不合法或手机不能驱动。参数同 `iphone-use-mcp test`，见 [`testing.zh-CN.md`](testing.zh-CN.md)。 |
+| `iphone-use schedule add\|list\|runs\|run\|enable\|disable\|rm …` | 定时跑 flow 和测试套件，是 `/agent/schedules` 的命令行（[参考](agent-reference.md#http-api)）。 |
+| `iphone-use device info\|ddi\|runner-status --udid <UDID> [--port 8100]` | 直接通过 usbmuxd 读手机：名称和 iOS 版本、开发者磁盘映像是否挂载、runner 在设备端口上的 `/status`（还没人应答时退出码 1）。 |
+
+`metrics`、`test`、`schedule` 都接受 `--instance <名字>` 指定第二台手机（默认 `IPHONE_USE_INSTANCE`）。
+
 ### 配置
 
-早期版本把这些变量叫 `PHONE_REMOTE_*`。旧名字仍然有效，环境变量和已安装的 LaunchAgent plist 里都认；两个都设了以 `IPHONE_USE_*` 为准，下一次运行 `install.sh` 会改写成新名字。
+早期版本把这些变量叫 `PHONE_REMOTE_*`。旧名字仍然有效，环境变量和已安装的 LaunchAgent plist 里都认；两个都设了以 `IPHONE_USE_*` 为准，下一次运行 `install.sh` 会改写成新名字。`IPHONE_USE_INTERNAL_TEST_*` 是测试用的，不列。
+
+**daemon**（LaunchAgent plist 的 `EnvironmentVariables`，或 `iphone-use serve` 的环境）：
 
 | 环境变量 | 默认 | 用途 |
 |---|---|---|
 | `IPHONE_USE_HOST` / `IPHONE_USE_PORT` | `127.0.0.1` / `44321` | 监听地址和端口（局域网用 `0.0.0.0`，此时必须设密码）。 |
+| `IPHONE_USE_BASE_PATH` | 无 | 把页面放在一个路径前缀下（`/lab`），几个 daemon 共用一个域名；见[第二台手机](#第二台手机命名实例)。API 不带前缀。 |
 | `IPHONE_USE_PASSWORD` | 无 | 浏览器登录密码；没设 agent token 时兼作 bearer。 |
 | `IPHONE_USE_AGENT_TOKEN` | 无 | 专用 agent bearer。设了以后是**唯一**接受的 bearer。 |
+| `IPHONE_USE_SESSION_TTL` | `28800`（8 小时） | 浏览器会话 cookie 的存活时间。`0` 或非法值回到默认，没有“永不过期”。 |
 | `IPHONE_USE_UDID` | 安装器识别并持久化 | 托管 runner 和破坏性命令使用的 canonical iPhone。请求不能临时换机，要改就改部署并重启。setup 时传同值 `IPU_RUNNER_UDID`。 |
-| `IPHONE_USE_RUNNER_URL` / `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | runner 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。 |
+| `IPHONE_USE_BACKEND` | `direct` | setup 写入。`direct` 通过设备 runner 控制手机，也是唯一的后端；`mirror`（iPhone 镜像，v0.9 已移除）会被拒绝并提示，改走 runner。 |
+| `IPHONE_USE_SIMULATOR` | 未设 | 这个 daemon 控制的模拟器（预览；`simulator start` 设置）。设备服务改走 `simctl`，见[模拟器](#模拟器预览)。 |
+| `IPHONE_USE_RUNNER_URL` / `IPHONE_USE_RUNNER_MJPEG_URL` | `http://127.0.0.1:8100` / `:9100` | runner 控制和 MJPEG 的 loopback。不可达时控制请求直接失败。外部 runner 要么两个都设，要么都不设；安装器不接受远程控制地址配 loopback 视频地址。 |
 | `IPHONE_USE_RUNNER_MANAGED` | loopback 端点默认开 | daemon 是否负责 runner supervisor / 中继的生命周期。 |
 | `IPHONE_USE_PREWARM` | 开 | `0` 关闭预热。`IPHONE_USE_PREWARM_RECENT_SECS`（默认 `3600`）是多久内用过才预热，`IPHONE_USE_PREWARM_INTERVAL_SECS`（默认 `600`）限制每种触发的频率。 |
 | `IPHONE_USE_IDLE_RELEASE_SECS` | `300` | 空闲多少秒后停 runner 并停放 supervisor，下一次 agent 请求再拉起；`0` 表示常驻，代价是 iOS 每杀一次 runner 就弹一次密码。 |
+| `IPHONE_USE_IDLE_RELEASE` | 未设 | `force` 让下次启动需要人介入的手机（有锁屏密码、或不能走 Wi‑Fi 启动）空闲时也释放 runner；见生命周期一节的 `keep_runner_alive`。 |
 | `IPHONE_USE_KEEP_AWAKE_SECS` | `120` | 有人在操作手机时、以及最后一次请求之后这么多秒内，不让手机自动锁屏（hold、实时画面、owner 租约期间也一样）。runner 每 10 秒按一下 iOS 不响应的 F13 键，已锁屏的手机不碰。`0` 关闭。 |
 | `IPHONE_USE_OWNER_LEASE_SECS` | `300` | `X-Phone-Owner` 租约在没有请求刷新时的存活时间。 |
+| `IPHONE_USE_AUTO_FOCUS` | 开 | `0` 关掉自动勿扰：装了 `focus_on` / `focus_off` 意图后，agent 会话的第一个控制请求会在安静时刻打开勿扰（不碰用户自己选的专注模式），交还手机时关掉。 |
+| `IPHONE_USE_SOURCE_MAX_NODES` | `1000` | 节点数超过这个值的读树保持“精简”（不带 `isVisible`）。只是 daemon 侧的阈值；runner 自己把每次读树限制在 5000 个节点、64 层。 |
+| `IPHONE_USE_IMAGE_BUDGET_BYTES` | `3500000` | `/agent/elements` 附带截图（控件树不可用时的视觉回退）时的体积上限：图片按 1200、800、500 px 依次尝试，直到整个 JSON 低于客户端常见的 4 MB 读取上限，文字不会被图片挤掉。 |
+| `IPHONE_USE_H264_PASSTHROUGH` | 开 | `0` 让 runner 的 H.264 一律在 Mac 上重新编码，不直接透传手机的码流。 |
+| `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
+| `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
+| `IPHONE_USE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |
+| `IPHONE_USE_ELEMENTS_TRAITS` | 关 | `1` 再输出原始的辅助功能 trait 名。 |
+| `IPHONE_USE_FLOWS_DIR` | `~/.iphone-use/flows` | daemon、`iphone-use-mcp` 和定时任务共用的本地 flow 存储（权限 0700）。 |
+| `IPHONE_USE_FLOWS_REPO` | `leeguooooo/iphone-use-flows` | `flow publish` 开 PR、`flow report` 提 issue 的那个源（`owner/name`，都走 `gh`）。 |
+| `IPHONE_USE_NO_UPDATE_CHECK` | 关 | 跳过每日 release 检查。 |
+| `IPHONE_USE_TELEMETRY` | 这个构建里关 | 匿名用量遥测没有配置项目 token（`IPHONE_USE_TELEMETRY_TOKEN`）时什么都不发；`0` / `false` / `off` / `no` 或 `DO_NOT_TRACK=1` 一律关闭。见 [`telemetry.md`](telemetry.md)。 |
+| `IPHONE_USE_TAILNET_BIN` / `IPHONE_USE_CLOUDFLARED` | `iphone-use` 旁边 / PATH，再找 Homebrew | 远程访问的两个 helper（见“在任意网络远程控制”）。它们的设置不在环境变量里，而在 `iphone-use remote` 写的 `~/.iphone-use/remote/remote.json`。 |
+
+**setup 和设备 runner**（`iphone-use setup`、`~/.iphone-use/setup-runner.sh`；supervisor plist 会记住重连和升级需要的那些）：
+
+| 环境变量 | 默认 | 用途 |
+|---|---|---|
+| `IPU_RUNNER_UDID` | 唯一那台 USB iPhone | 给哪台手机做 setup；插了几台时必填。和 `IPHONE_USE_UDID` 同值。 |
+| `IPU_RUNNER_TEAM_ID` | Xcode 上次选的团队 | 给 runner 签名的 Apple 开发团队。命名实例继承默认实例的。 |
+| `IPU_RUNNER_BUNDLE_ID` | 由团队 id 推导 | runner 的 bundle id。 |
+| `IPU_RUNNER_ASC_KEY_PATH` / `IPU_RUNNER_ASC_KEY_ID` / `IPU_RUNNER_ASC_ISSUER_ID` | 无 | App Store Connect API key（`.p8` 绝对路径、key id、issuer id，三个都要），不登录 Xcode 账号也能签。iOS 15/16 的手机必须用它。 |
+| `IPU_RUNNER_PORT` / `MJPEG_PORT` | `8100` / `9100`（命名实例按名字推导） | Mac 侧 runner 控制和视频的中继端口，两个不能相同。 |
+| `IPU_RUNNER_TRANSPORT` | `auto` | `auto`：没插线时走 CoreDevice 加密的 Wi‑Fi 隧道（有线优先）；`usb` 必须插线。 |
+| `IPU_RUNNER_ALLOW_LAN` | 关 | `1` 额外开一条到手机地址的明文局域网中继，只适合可信的隔离网络。不影响选哪台手机。 |
+| `IPU_RUNNER_EXIT_NOTICE` | `auto` | runner 能否在手机上显示退出提示：`auto` 只用已有的通知权限，`1` 主动申请，`0` 不显示。 |
+| `IPU_RUNNER_KEEPALIVE` | supervisor plist 设置 | `1` 标记 launchd 运行的那份 setup 脚本，由它保持 runner 存活。不用手动设。 |
 | `IPU_RUNNER_SRC` | `~/.iphone-use/runner` | setup 编译的设备 runner 源码（仓库里的 `scripts/setup-runner.sh` 用仓库自己的 `runner/`）。只有不是默认值时才持久化。 |
 | `IPU_RUNNER_REBUILD` | 关 | `1` 让下一次 setup 忽略记录的 runner 产物、重新编译。 |
 | `IPU_EMBED` | 开 | `0` 编译不带手机端 daemon 的设备 runner。会写进 supervisor。 |
 | `IPU_EMBED_LIB` | `~/.iphone-use/runner/embed/libipu_embed.a` | setup 链接进 runner 的手机端 daemon 库（绝对路径）。仓库里用 `scripts/build-ios-embed.sh` 现编；都找不到就编普通 runner。会写进 supervisor。 |
 | `IPU_DAEMON_HOST` | `127.0.0.1` | runner 里的 daemon 在手机上监听的地址；`0.0.0.0` 让别的设备也能通过它操作这台手机（仍要 token）。会写进 supervisor。 |
-| `IPHONE_USE_RUNNER_SNAPSHOT_MAX_DEPTH` | runner 默认 64 | 只对外部 WebDriverAgent 生效；设备 runner 自己限制读树（深度阶梯、5000 个节点）。 |
-| `IPHONE_USE_RUNNER_SNAPSHOT_TIMEOUT_S` | — | 同上，只对 WebDriverAgent 生效。 |
-| `IPHONE_USE_ELEMENTS_AFFORDANCES` | 关 | `1` 给 `/agent/elements` 的行加稀疏的 `actions`、`selected`、`min` / `max`。 |
-| `IPHONE_USE_ELEMENTS_TRAITS` | 关 | `1` 再输出原始的辅助功能 trait 名。 |
-| `IPHONE_USE_NO_UPDATE_CHECK` | 关 | 跳过每日 release 检查。 |
+| `IPHONE_USE_XCODE` | 当前选中的 Xcode | 这台手机专用的 `Xcode.app`（`iphone-use setup --xcode`），给 iOS 版本需要另一个 Xcode 的手机用。 |
+| `IPHONE_USE_LEGACY_LAUNCH` | 二进制旁边，再找已安装的 app | 在 iOS 15/16 上启动 runner 的 `iphone-use-legacy-launch` helper。 |
+| `IPHONE_USE_DDI_BASE_URL` | Apple 的 | iOS 15/16 开发者磁盘映像的 `https://` 镜像地址。 |
+| `IPHONE_USE_APP_SRC` | 本版本的 `iphone-use-app.tar.gz` | `iphone-use setup-app` 改从这个检出编译原生 iOS App；见[安装 App](#安装-app)。 |
+
+**安装器和升级**（`install.sh`、每晚的自动升级任务）：
+
+| 环境变量 | 默认 | 用途 |
+|---|---|---|
+| `IPHONE_USE_NO_SETUP` | 关 | `1`（或 `--no-setup`）让首次安装跳过手机那一步；升级从不跑它。 |
+| `IPHONE_USE_SKIP_SKILL` | 关 | `1` 不动 agent skill（降级安装，不保证兼容）。 |
+| `IPHONE_USE_AUTO_UPDATE` | 开 | `0`（或 `--no-auto-update`）持久关闭每晚自动升级任务；见[升级](#升级)。 |
+| `IPHONE_USE_AUTO_UPDATE_JOB` | `auto-update.sh` 设置 | `1` 告诉 `install.sh` 它在每晚任务下运行（安静，不开浏览器）。不用手动设。 |
+
+**MCP server 和命令行**（客户端给 `iphone-use-mcp` 的 `env`，或 shell）：
+
+| 环境变量 | 默认 | 用途 |
+|---|---|---|
+| `IPHONE_USE_URL` | 从 LaunchAgent 读 | 要连的 daemon（`http://127.0.0.1:44321`；命名实例用它的端口）。 |
+| `IPHONE_USE_TOKEN` | 从 LaunchAgent 读 | agent bearer（`IPHONE_USE_AGENT_TOKEN` 的值）。 |
+| `IPHONE_USE_INSTANCE` | `default` | 命令行和 MCP server 指向哪个 daemon / 手机（命令行用 `--instance`）。 |
+| `IPHONE_USE_OWNER` | `mcp-<pid>` | MCP server 和 `flow run` 发送的 `X-Phone-Owner`；owner 租约按这个值区分。 |
+| `IPHONE_USE_MCP_TOOLS` | `all` | MCP server 列出并接受哪些工具：`core`（不含开发者工具）、`readonly`，或逗号列表；见 [MCP server](#mcp-server)。 |
+| `IPHONE_USE_MCP_STRUCTURED` | 精简 | `full` 把 daemon 的完整 JSON 作为 `structuredContent` 返回，`off` 不返回。 |
+| `IPHONE_USE_MCP_PREWARM` | 关 | `1` 让 MCP server 启动时请 daemon 预热 runner；默认关，发现工具和闲聊不会吵醒手机。 |
+| `IPHONE_USE_MCP_TOKEN` | 无 | `iphone-use-mcp --listen` 时 HTTP 客户端必须带的 bearer；监听非 loopback 地址时必填。 |
 
 ## 安全
 
@@ -458,7 +625,7 @@ daemon 把手机的实时控制放到了网络上，它的 URL 和密码要当�
 - 密码 / cookie / bearer 保护 `44321`。手机上 runner 的 `8100` 和 `9100` 监听所有网卡，但不带本次启动令牌签名的请求一律 401、不做任何事：签名是 HMAC-SHA256，覆盖方法、路径、请求体、时间戳和一次性 nonce。令牌只存在 Mac 上（状态目录里的 `runner-token`，权限 0600）和 runner 的测试环境里，从不在网络上传输，所以截获的请求既不能重放也不能篡改。没拿到令牌就启动的 runner 拒绝一切请求。
 - 签名不等于加密。USB 和 CoreDevice 隧道只通到这台 Mac；iOS 15/16 的局域网转发和 `IPU_RUNNER_ALLOW_LAN=1` 都是明文 HTTP，截图、元素树、视频对能看到这段 Wi-Fi 流量的人可见。能读你这个用户文件的人也能读到令牌。
 - **Wi-Fi**：usbmuxd 对 Wi-Fi 手机的网络连接只能到 lockdownd，到不了 runner 的端口，所以 `iphone-use relay` 改走 CoreDevice 的隧道（`devicectl list devices` 里 `tunnelState` 为 `connected` 时的 `tunnelIPAddress`）。这条隧道是加密的、只有这台 Mac 能走，比局域网 `socat`（`IPU_RUNNER_ALLOW_LAN=1`）安全，所以默认就开：已配对、没插线但隧道在线的手机，setup 和重新拉起都直接走隧道（`IPU_RUNNER_TRANSPORT=auto`；没设 `IPU_RUNNER_UDID` 又没插线时，只在恰好一台手机有隧道时选它，多台就拒绝猜）。插着线时仍然走 USB；隧道上一次点击约 330–380 ms，USB 约 280 ms。状态里 `transport` 显示 `wifi-tunnel`。`IPU_RUNNER_TRANSPORT=usb` 恢复「setup 必须插线」的旧规则。`IPU_RUNNER_ALLOW_LAN=1` 是另一个独立的、不安全的开关，只管明文局域网中继（`transport` 为 `wifi`）；plist 里写着 `IPU_RUNNER_ALLOW_LAN=0` 的老安装升级后会走隧道，但不会因此打开局域网中继。不少手机在 Wi-Fi 下也能重新启动 runner（iOS 27.0 的 iPhone 17 Pro Max 几秒就起来）；但有的 iOS 不允许通过 Wi-Fi 启动 UI 自动化（`wifi_automation_refused`，在 iOS 27.2 beta 的 iPhone 14 上遇到：没有密码提示，「启用 UI 自动化」已打开，Xcode 27.0 和 27.2 beta 都一样，手机上没有能点的选项）。这种手机插一次线启动，之后拔掉可以一直用 Wi-Fi，直到设备服务重启（比如手机重启）时再插一次。为此 setup 会在实例目录留下 `wifi-start-refused` 标记（下次在 Wi-Fi 下启动成功就删掉），标记存在且手机走 Wi-Fi 隧道时，空闲释放不再停 runner，状态里 `wifi_start_refused` 为 true；代价是空闲时手机一直处于自动化状态。走 USB 时照常空闲释放。
-- 从局域网外访问时，经由带鉴权的 HTTPS 反向代理，或可信的 VPN / 隧道（比如 Tailscale）连到 `44321`，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`。
+- 从局域网外访问时用 `iphone-use remote`（见[在任意网络远程控制](#在任意网络远程控制tailscale--cloudflare-tunnel)），或者你自己的带鉴权 HTTPS 反向代理、VPN，绝不要把 runner 的端口暴露出去。daemon 只提供明文 HTTP，识别 `X-Forwarded-Proto`，session cookie 是 `HttpOnly` + `SameSite=Lax`（经 HTTPS 时带 `Secure`）。quick tunnel 的地址是公开的，知道地址的人都能打开登录页，所以密码要够强，不用时关掉（`iphone-use remote cloudflare off`）。
 - owner 租约（`X-Phone-Owner`）是协作会话之间的协调机制，不是安全边界。
 - 开放访问期间不要停在支付、私聊或 2FA 画面。不用时停掉 LaunchAgent。
 
@@ -548,6 +715,15 @@ IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use s
 6. 观察到 `releasing → released → reconnecting → ready`，并覆盖锁屏 / 解锁、USB 重连、Mac 重启、runner 重签重装，多设备 Mac 上目标不串。
 7. 在隔离网络里记录手机 IP 是否暴露无鉴权的 `8100/9100`。
 
+## 其他文档
+
+- [`agent-reference.md`](agent-reference.md)（英文）：给 agent 看的参考，也在 `/agent/reference` 提供：状态、HTTP API、动作、flow。
+- [`agent-task.md`](agent-task.md)（英文）：`/agent/task`，把一个目标整个交给 daemon，在 Mac 或手机上跑。
+- [`testing.zh-CN.md`](testing.zh-CN.md)：可重复运行的测试套件（`iphone-use test`）。
+- [`telemetry.md`](telemetry.md)（英文）和 [`privacy.zh-CN.md`](privacy.zh-CN.md)：哪些数据离开 Mac，怎么关。
+- [`security/`](security/centralized-scan-review.md)（英文）：2026-10-17 插件目录扫描的复核和由此做的改动。
+- 历史记录，不再维护：[`measurements/`](measurements/agent-loop-ab-2026-10-07/README.md)（单次调用 vs 一个批次，2026-10-07）、[`promo/`](promo/README.md)（宣传片，用 v0.17.14 录制）、[`discoverability/`](discoverability/README.md)（搜索和 AI 发现的笔记）。
+
 ## 反馈
 
 碰到问题请[开 issue](https://github.com/leeguooooo/iphone-use/issues)。也欢迎 AI agent 来提：随包的 skill 让它在 API 误导自己时（经用户同意）提结构化 issue，flow 的问题则提到[官方源](https://github.com/leeguooooo/iphone-use-flows/issues)。
@@ -555,31 +731,3 @@ IPHONE_USE_HOST=0.0.0.0 IPHONE_USE_PASSWORD=secret ./target/release/iphone-use s
 ## 许可证
 
 [PolyForm Shield 1.0.0](../LICENSE)。本项目采用源码可见许可，允许符合条款的非竞争用途、修改和分发；禁止使用本软件提供竞争产品或服务，包括免费竞品。详见[许可范围与第三方声明](../LICENSING.md)。
-
-
-### 多指长按与 Jev 读取恢复
-
-`phone_run_steps` 和保存的 flow 支持 `kind:"multi_longpress"`：
-
-```json
-{"kind":"multi_longpress","points":[{"x":0.3,"y":0.5},{"x":0.5,"y":0.5},{"x":0.7,"y":0.5}],"duration_ms":1500}
-```
-
-`points` 包含 2–5 个互不重复的归一化坐标，数组长度就是手指数。
-HTTP `/agent/input` 或 `/agent/actions` 使用 `type:"multi_longpress"`。
-时长默认 1000 ms，范围 1–10000 ms；发送前检查全部坐标，失败时不会降级为单指。
-普通 `longpress` 收到 `fingers:3` 会拒绝执行。协议与批处理已有自动化测试，
-具体 App 能否识别这一手势仍需真机验证。
-
-Jev 遇到 HTTP 504 `runner_source_timeout` 时，会按响应中的
-`retry_after_secs` 等待 1–60 秒，仅重试一次读取，让服务端返回有界树。
-不会重放前一步点击。操作后的读取恢复失败时返回 `status:"blocked"`，
-保留 `history` 和 `last_successful_action`，供后续接手核验。
-
-
-Jev 收到确认未发送的 `element_occluded`，且当前读屏中键盘可见时，会尝试一次
-`DISMISS_KEYBOARD` 并重新读屏。该动作使用独立的 `keyboard_dismiss_only`，只匹配明确的
-“隐藏键盘”按钮，不按 Done、Return 或 Search；没有这种按钮时返回 blocked。
-旧 daemon 会拒绝这个独立动作，不会忽略保护参数后按下 Search。
-它不清空搜索词、不提交，也不绕过遮挡保护。
-键盘仍在或再次遇到遮挡时返回 blocked；动作结果未知时不触发这条自动恢复路径。

@@ -1303,7 +1303,38 @@ fn pick_entry<'a>(
     extra_hosts: &[String],
 ) -> Result<&'a VaultEntry, LoginError> {
     let matches = match &request.item {
-        Some(item) => by_item(entries, item, request.user.as_deref()),
+        Some(item) => {
+            let named = by_item(entries, item, request.user.as_deref());
+            // An explicit item still has to belong to the app on screen: the
+            // same bundle/host binding the candidate path applies, so a caller
+            // cannot have the bank's password typed into whatever app is in
+            // front by naming the entry.
+            if !named.is_empty() {
+                let for_this_app = candidates(entries, bundle, app_name, extra_hosts);
+                let bound: Vec<&VaultEntry> = named
+                    .iter()
+                    .copied()
+                    .filter(|entry| for_this_app.iter().any(|c| c.id == entry.id))
+                    .collect();
+                if bound.is_empty() {
+                    return Err(LoginError::new(
+                        403,
+                        "item_not_for_this_app",
+                        format!(
+                            "the vault entry {item:?} is not for {}: its URIs name neither this app nor the page on screen; open the app the entry is for, or pick an entry that matches",
+                            if app_name.is_empty() { "the app on screen" } else { app_name }
+                        ),
+                    )
+                    .with(
+                        "candidates",
+                        Value::Array(for_this_app.iter().take(10).map(|e| e.public()).collect()),
+                    ));
+                }
+                bound
+            } else {
+                named
+            }
+        }
         None => {
             let found = prefer_with_username(prefer_named_after_host(
                 candidates(entries, bundle, app_name, extra_hosts),
@@ -2173,6 +2204,32 @@ mod tests {
             &[],
         );
         assert!(tied.is_err());
+    }
+
+    #[test]
+    fn an_explicit_item_must_still_belong_to_the_app_on_screen() {
+        let entries = vec![
+            entry("gh", "github.com", "me@x.com", &["https://github.com/login"]),
+            entry("bank", "My Bank", "me", &["https://bank.example"]),
+        ];
+        let request = LoginRequest { item: Some("bank".into()), ..Default::default() };
+        // The GitHub app is in front: naming the bank's entry is refused.
+        let refused = pick_entry(&entries, &request, Some("com.github.stormbreaker.prod"), "", &[])
+            .err()
+            .expect("the bank entry is not for GitHub");
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.error, "item_not_for_this_app");
+        assert_eq!(refused.extra["candidates"][0]["name"], "github.com", "the entries that ARE for this app are offered");
+        // The same item in the app it belongs to (by the page host) is fine.
+        let one = pick_entry(&entries, &request, Some("com.apple.SafariViewService"), "", &["bank.example".into()])
+            .unwrap();
+        assert_eq!(one.id, "bank");
+        // A name nothing has stays the plain not-found answer.
+        let missing = LoginRequest { item: Some("nope".into()), ..Default::default() };
+        let refused = pick_entry(&entries, &missing, Some("com.github.stormbreaker.prod"), "", &[])
+            .err()
+            .unwrap();
+        assert_eq!(refused.error, "no_vault_entry");
     }
 
     #[test]

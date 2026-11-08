@@ -345,11 +345,10 @@ pub fn maybe_notice(
     }
 }
 
+/// Seconds since the Unix epoch (`core::clock::unix_now`; kept here because
+/// `main.rs` reaches it as `update::unix_now`).
 pub fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    core::clock::unix_now()
 }
 
 // ---------------------------------------------------------------------------

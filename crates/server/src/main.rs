@@ -29,6 +29,7 @@ use server::config::Config;
 use server::http::{self, AppState};
 
 mod onboarding;
+mod remote_cli;
 
 /// PID file name inside the runtime dir.
 const PID_FILE: &str = "iphone-use.pid";
@@ -96,6 +97,15 @@ fn socket_host(host: &str) -> &str {
     host.strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .unwrap_or(host)
+}
+
+/// Where a helper on this Mac reaches the daemon: loopback when it listens on
+/// every interface, the configured address otherwise.
+fn loopback_authority(host: &str, port: u16) -> String {
+    match socket_host(host) {
+        "0.0.0.0" | "::" | "" => format!("127.0.0.1:{port}"),
+        _ => http_authority(host, port),
+    }
 }
 
 /// Format a configured host for an HTTP authority.
@@ -347,6 +357,14 @@ enum Command {
         /// Print the link instead of opening the browser.
         #[arg(long)]
         no_open: bool,
+    },
+    /// Control the phone from any network: Tailscale or Cloudflare Tunnel.
+    Remote {
+        /// A named instance (a second phone); default: IPHONE_USE_INSTANCE.
+        #[arg(long, global = true)]
+        instance: Option<String>,
+        #[command(subcommand)]
+        action: Option<remote_cli::RemoteAction>,
     },
     /// Sign the app on the phone in from your own password vault
     /// (bitwarden-use), or enter the verification code it asks for.
@@ -1053,6 +1071,10 @@ fn main() -> Result<()> {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_try(&target)?)
         }
+        Command::Remote { instance, action } => {
+            let target = onboarding::Target::resolve(instance.as_deref())?;
+            std::process::exit(remote_cli::run(&target, action)?)
+        }
         Command::Login { instance, no_open } => {
             let target = onboarding::Target::resolve(instance.as_deref())?;
             std::process::exit(onboarding::run_login(&target, !no_open)?)
@@ -1311,6 +1333,16 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         // Daily release check → /agent/status {version, latest, update_available}.
         spawn_update_check(state.clone());
 
+        // Remote access (Tailscale / Cloudflare Tunnel): keep the helpers
+        // `iphone-use remote …` turned on running (see `remote`).
+        server::remote::spawn_supervisor(server::remote::SupervisorInputs {
+            state_dir: server::instance::current().state_dir.clone(),
+            instance: server::instance::current().name.clone(),
+            upstream: format!("http://{}", loopback_authority(&cfg.host, cfg.port)),
+            port: cfg.port,
+            password_set: cfg.password.is_some(),
+        });
+
         // Keep the flow registry on this Mac fresh so `registry` hints have
         // something to name. Runs `iphone-use-mcp flow update`, never a
         // second implementation of fetching and verification.
@@ -1402,8 +1434,13 @@ fn run_server(cfg: Config, state: Arc<AppState>, runtime_dir: std::path::PathBuf
         }
 
         // The cloud relay, when configured: reach this daemon from anywhere.
-        if let Some(relay) = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty()) {
+        // Only with a password — the relay puts every route on the internet.
+        let relay = std::env::var("IPHONE_USE_RELAY_URL").ok().filter(|v| !v.is_empty());
+        if server::remote::relay_allowed(cfg.password.is_some(), relay.as_deref()) {
+            let relay = relay.unwrap_or_default();
             server::relay_client::spawn(move || Some(relay.clone()), server::instance::current().state_dir.clone(), cfg.port);
+        } else if relay.is_some() {
+            tracing::warn!("IPHONE_USE_RELAY_URL ignored: {}", server::remote::REQUIRES_PASSWORD);
         }
         let app = http::router(state);
         let serve_result = axum::serve(listener, app)

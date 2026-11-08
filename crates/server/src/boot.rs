@@ -248,11 +248,22 @@ pub fn serve_embedded(options: EmbeddedOptions) -> Result<()> {
         );
         crate::keep_awake::spawn(state.clone());
         crate::lock_readiness::spawn(state.clone());
+        // The relay address is read on every dial so a `relay.json` dropped
+        // later is picked up; the password is the daemon's for its lifetime,
+        // so it decides here whether the relay runs at all.
         let relay_url = {
             let documents = documents.clone();
-            move || relay_url(documents.as_deref())
+            let password_set = cfg.password.is_some();
+            move || {
+                let url = relay_url(documents.as_deref());
+                crate::remote::relay_allowed(password_set, url.as_deref()).then_some(url).flatten()
+            }
         };
-        crate::relay_client::spawn(relay_url.clone(), instance.state_dir.clone(), cfg.port);
+        if cfg.password.is_some() {
+            crate::relay_client::spawn(relay_url.clone(), instance.state_dir.clone(), cfg.port);
+        } else {
+            tracing::warn!("cloud relay off: {}", crate::remote::REQUIRES_PASSWORD);
+        }
         if let Some(documents) = documents {
             let pairing = state.pairing.clone();
             let port = cfg.port;

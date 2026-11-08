@@ -217,6 +217,12 @@ final class DaemonClient: @unchecked Sendable {
     var base: URL { routes.withLock { $0.active } }
     /// True while requests go straight to the Mac on the LAN.
     var onLAN: Bool { base != publicBase }
+    /// A Cloudflare quick tunnel holds a streamed response until it ends, so
+    /// `/agent/h264` and `/agent/mjpeg` never show a frame there; the session
+    /// polls stills instead.
+    var streamsBuffered: Bool {
+        base.host?.lowercased().hasSuffix(".trycloudflare.com") ?? false
+    }
     /// The daemon's LAN addresses (`lan_urls`), best first; empty from older daemons.
     var lanCandidates: [URL] { routes.withLock { $0.lan } }
     /// The key a LAN address must prove it holds (`lan_key`, from `/pair`)
@@ -452,8 +458,10 @@ final class DaemonClient: @unchecked Sendable {
 
     /// The current screen as `/agent/screenshot` answers it, and whether that
     /// answer is the wireframe of a screen hidden from capture.
-    func screenshot() async throws -> (Data, redacted: Bool) {
-        let (data, response) = try await send(request("agent/screenshot"))
+    func screenshot(maxSide: Int? = nil) async throws -> (Data, redacted: Bool) {
+        let path = "agent/screenshot"
+        let query = maxSide.map { [URLQueryItem(name: "max_side", value: String($0))] }
+        let (data, response) = try await send(query.map { request(path, query: $0) } ?? request(path))
         if response.statusCode == 401 { throw DaemonError.sessionExpired }
         guard response.statusCode == 200 else {
             throw DaemonError.http(response.statusCode, String(decoding: data, as: UTF8.self))

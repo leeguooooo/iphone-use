@@ -63,6 +63,9 @@ _inline_sign() {
     if [ -f "$app/Contents/MacOS/iphone-use-legacy-launch" ]; then
         codesign --force --sign - "$app/Contents/MacOS/iphone-use-legacy-launch"
     fi
+    if [ -f "$app/Contents/MacOS/iphone-use-tailnet" ]; then
+        codesign --force --sign - "$app/Contents/MacOS/iphone-use-tailnet"
+    fi
     codesign --force --sign - "$app/Contents/MacOS/iphone-use"
     codesign --force --sign - "$app"
     ok "Ad-hoc signed without creating a certificate or changing keychain state"

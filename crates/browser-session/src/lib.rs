@@ -5,7 +5,7 @@ use aes_gcm::{
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use std::ffi::{c_char, CStr, CString};
 use zeroize::Zeroizing;
@@ -21,11 +21,11 @@ pub fn seal_message(value: &Value, key: &[u8; 32], context: &[u8]) -> Result<Str
         return Err("message_too_large");
     }
     let mut nonce = [0; 12];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| "invalid_key")?;
     let encrypted = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: &bytes,
                 aad: context,
@@ -50,7 +50,7 @@ pub fn open_message(value: &str, key: &[u8; 32], context: &[u8]) -> Result<Value
     let plain = Zeroizing::new(
         cipher
             .decrypt(
-                Nonce::from_slice(&bytes[..12]),
+                &Nonce::try_from(&bytes[..12]).map_err(|_| "invalid_message")?,
                 Payload {
                     msg: &bytes[12..],
                     aad: context,
@@ -98,7 +98,10 @@ pub fn open(bytes: &[u8], password: &[u8]) -> Result<Value, &'static str> {
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "invalid_key")?;
     let plaintext = Zeroizing::new(
         cipher
-            .decrypt(Nonce::from_slice(&encrypted[..12]), &encrypted[12..])
+            .decrypt(
+                &Nonce::try_from(&encrypted[..12]).map_err(|_| "invalid_bundle")?,
+                &encrypted[12..],
+            )
             .map_err(|_| "wrong_password_or_corrupt_bundle")?,
     );
     let payload: Value = serde_json::from_slice(&plaintext).map_err(|_| "invalid_payload")?;
@@ -135,12 +138,12 @@ pub fn seal(payload: &Value, password: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
     let mut salt = [0; 16];
     let mut nonce = [0; 12];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut nonce);
     let key = derive(password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&*key).map_err(|_| "invalid_key")?;
     let encrypted = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext.as_slice())
+        .encrypt(&Nonce::from(nonce), plaintext.as_slice())
         .map_err(|_| "encrypt_failed")?;
     let mut combined = nonce.to_vec();
     combined.extend(encrypted);

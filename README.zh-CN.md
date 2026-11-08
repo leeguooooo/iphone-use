@@ -154,7 +154,7 @@ codex plugin marketplace add leeguooooo/iphone-use && codex plugin add iphone-us
 - **用浏览器。** 实时画面是手机自己编码的 H.264：局域网里原生分辨率约 50 fps，网络慢时有省流模式。单击是点击，拖动是滑动，按住是长按，滚轮和触控板能滚动。点一下画面就能用你的输入法直接往手机里打字，⌘V 能粘贴。「控件」面板列出屏幕上的元素，可以按名字点；「流程」面板能把你的操作录成可重放的 flow。页面语言跟随浏览器（中文或英文），侧栏可以切换。
 - **用另一台 iPhone。** iOS 原生 App（最低部署版本 iOS 15）在 Mac 网页上扫个码就配对，不用输地址和密码。用系统硬件解码播放画面，多台手机之间随时切换。
 - **禁止截屏的页面也能操作。** 银行、支付类 App 会把截屏画面涂黑，这时你看到的是屏幕元素的实时线框图，而不是一片空白，照样可以点着操作。
-- **在外面也能连。** 通过带鉴权的 HTTPS 反向代理或 Tailscale 这类 VPN 连到 Mac，就能在外网控制手机（[安全说明](docs/guide.zh-CN.md#安全)）。
+- **任意网络都能连。** `iphone-use remote tailscale on` 让手机以独立设备的身份加入你的 tailnet（Mac 上不用装 Tailscale App），`iphone-use remote cloudflare on` 开一条 Cloudflare Tunnel。之后在蜂窝或任何 Wi-Fi 下，浏览器打开它给的地址、App 扫 `iphone-use remote pair` 的二维码，或者让 agent 连这个地址都行（[详细说明](docs/guide.zh-CN.md#在任意网络远程控制tailscale--cloudflare-tunnel)）。
 - **不会撞车。** 一台手机同一时间只有一个使用者。你在操作时，agent 会等着，或被告知手机在谁手里；反过来也一样。
 
 整个过程不动 Mac：不抢窗口焦点，鼠标也不会被移走。
@@ -227,7 +227,7 @@ curl -s -H "$AUTH" -H "$CTL" -X POST "$HOST/agent/input?return=delta" \
   -d '{"type":"tap","element":7,"snapshot":"…"}'            # 点击，并返回界面变化（约 2 秒）
 ```
 
-给开发和测试用的功能也在同一套工具里：读取手机日志和崩溃报告、录屏保存为 MP4、安装测试包（`.ipa`、`.app` 或 https 链接）、模拟定位，以及按 App 记录经验笔记，agent 进入该 App 时会自动读到。`IPHONE_USE_MCP_TOOLS=readonly` 只开放读取类工具；`iphone-use-mcp --listen 127.0.0.1:端口` 可以通过 HTTP 提供 MCP。监听 127.0.0.1 时只有本机能连；其他机器上的客户端要通过带认证的隧道访问，或者监听其他地址并设置 `IPHONE_USE_MCP_TOKEN`（非回环地址必须设置）。
+给开发和测试用的功能也在同一套工具里：读取手机日志和崩溃报告、录屏保存为 MP4、安装测试包（`.ipa`、`.app` 或 https 链接）、模拟定位，以及按 App 记录经验笔记，agent 进入该 App 时会自动读到。`IPHONE_USE_MCP_TOOLS=core` 去掉这些开发者工具，`readonly` 只开放读取类工具；`iphone-use-mcp --listen 127.0.0.1:端口` 可以通过 HTTP 提供 MCP。监听 127.0.0.1 时只有本机能连；其他机器上的客户端要通过带认证的隧道访问，或者监听其他地址并设置 `IPHONE_USE_MCP_TOKEN`（非回环地址必须设置）。
 
 手边没有手机？开发时可以用同样的方式操作 iOS 模拟器（预览，需要 Xcode）：`iphone-use simulator start "iPhone 16 Pro"` 会编译并启动所需的一切，然后用 `claude mcp add iphone-sim -e IPHONE_USE_INSTANCE=sim -- iphone-use-mcp` 把 agent 接上去。详见[模拟器](docs/guide.zh-CN.md#模拟器预览)。
 
