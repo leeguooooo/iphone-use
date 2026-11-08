@@ -75,7 +75,8 @@ pub fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
     let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(bytes, options);
+    let reader = zune_jpeg::zune_core::bytestream::ZCursor::new(bytes);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(reader, options);
     decoder.decode_headers().ok()?;
     let (width, height) = decoder.dimensions()?;
     let rgba = decoder.decode().ok()?;

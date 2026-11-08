@@ -1053,7 +1053,8 @@ fn decode_bgra(jpeg: &[u8], out: &mut Vec<u8>) -> Result<(usize, usize), String>
     use zune_jpeg::zune_core::colorspace::ColorSpace;
     use zune_jpeg::zune_core::options::DecoderOptions;
     let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::BGRA);
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(jpeg, options);
+    let reader = zune_jpeg::zune_core::bytestream::ZCursor::new(jpeg);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(reader, options);
     decoder.decode_headers().map_err(|e| e.to_string())?;
     let (width, height) = decoder.dimensions().ok_or("no dimensions")?;
     out.resize(width * height * 4, 0);
