@@ -369,7 +369,7 @@ pub fn start(
     }
     use sha2::{Digest, Sha256};
     // Keep only the digest; model keys and return parameters are never exposed.
-    let request_fingerprint = format!("{:x}", Sha256::digest(format!("{request:?}").as_bytes()));
+    let request_fingerprint = hex::encode(Sha256::digest(format!("{request:?}").as_bytes()));
     let id = new_id();
     let task = Arc::new(Task {
         state: Mutex::new(State {
@@ -1496,7 +1496,7 @@ mod tests {
     async fn request_id_deduplicates_and_pause_is_nonterminal() {
         let request=TaskRequest {goal:"synthetic goal".into(),client_request_id:Some("fixture-client".into()),..Default::default()};
         use sha2::{Digest, Sha256};
-        let request_fingerprint=format!("{:x}",Sha256::digest(format!("{request:?}").as_bytes()));
+        let request_fingerprint=hex::encode(Sha256::digest(format!("{request:?}").as_bytes()));
         let task=Arc::new(Task {
             state: Mutex::new(State {request_fingerprint,id:"fixture-dedup".into(),goal:"synthetic goal".into(),client_request_id:Some("fixture-client".into()),status:Status::Running,phase:"observing",planned_action:None,flow:None,steps:vec![],confirm:None,summary:None,error:None,started_at_ms:unix_ms(),started:Instant::now(),finished_ms:None,models_used:json!({})}),
             cancel:AtomicBool::new(false),paused:AtomicBool::new(false),cancel_signal:tokio::sync::Notify::new(),answer:Mutex::new(None),

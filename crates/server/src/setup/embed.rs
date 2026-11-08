@@ -170,9 +170,17 @@ fn usable(path: &Path) -> Result<EmbedLib, String> {
 }
 
 fn file_sha256(path: &Path) -> Option<String> {
+    use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
     let mut digest = Sha256::new();
-    std::io::copy(&mut file, &mut digest).ok()?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buf[..n]);
+    }
     Some(
         digest
             .finalize()
@@ -322,7 +330,7 @@ mod tests {
         );
         assert_eq!(
             cache_component(Some(&first)),
-            format!("embed:{:x}", Sha256::digest(b"one"))
+            format!("embed:{}", hex::encode(Sha256::digest(b"one")))
         );
         assert_eq!(cache_component(None), "embed:none");
         assert_eq!(

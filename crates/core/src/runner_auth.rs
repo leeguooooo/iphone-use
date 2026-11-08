@@ -20,7 +20,7 @@
 //! [`MAX_SKEW_SECS`] of its own clock, so a captured request cannot be
 //! replayed or altered.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
