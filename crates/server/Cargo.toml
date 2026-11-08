@@ -65,7 +65,7 @@ ring = "0.17"
 # Live video as H.264: runner's MJPEG frames are decoded (zune-jpeg) and
 # re-encoded on the Mac's hardware encoder (VideoToolbox), cutting a remote
 # viewer's bandwidth ~10x versus forwarding the JPEGs.
-zune-jpeg = "0.4"
+zune-jpeg = "0.5"
 
 # Scan-to-connect: the pairing page shows the one-time link as a QR code.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
