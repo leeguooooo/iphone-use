@@ -32,7 +32,7 @@ clap = { version = "4", features = ["derive"] }
 
 # async runtime + HTTP server.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "process", "fs"] }
-axum = "0.7"
+axum = "0.8"
 
 # HTTP client for runner and the release check. rustls-tls: no native-tls/openssl.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
