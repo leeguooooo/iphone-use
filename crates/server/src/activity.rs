@@ -535,6 +535,10 @@ fn describe_words(action: &Value, rows: Option<&[ElementRow]>) -> Line {
         "scroll" => line("Scrolled", "滚动"),
         "swipe" => swipe_line(action),
         "drag" => line("Dragged across the screen", "拖动"),
+        "pinch" => match action.get("scale").and_then(Value::as_f64) {
+            Some(scale) if scale > 1.0 => line("Pinched to zoom in", "双指放大"),
+            _ => line("Pinched to zoom out", "双指缩小"),
+        },
         "alert" => match (
             action.get("button").and_then(Value::as_str),
             action.get("action").and_then(Value::as_str),

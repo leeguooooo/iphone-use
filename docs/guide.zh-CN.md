@@ -355,6 +355,19 @@ HTTP `/agent/input` 或 `/agent/actions` 使用 `type:"multi_longpress"`。
 普通 `longpress` 收到 `fingers:3` 会拒绝执行。协议与批处理已有自动化测试，
 具体 App 能否识别这一手势仍需真机验证。
 
+### 双指捏合缩放
+
+照片裁剪、地图这类只能双指缩放的界面用 `kind:"pinch"`（HTTP 用 `type:"pinch"`）：
+
+```json
+{"kind":"pinch","x":0.5,"y":0.5,"scale":0.7}
+```
+
+`scale` 小于 1 是捏小（缩小），大于 1 是张开（放大），范围 0.2–5，不能离 1 太近（差值至少 0.05）。
+`x`/`y` 是中心（默认屏幕中心），`angle` 是两指连线角度（0 为水平），
+`spread` 是两指较大间距占屏幕短边的比例（默认 0.6），`duration_ms` 100–2000（默认 500）。
+手指不会落进屏幕边缘的系统手势区；放不下的捏合在发送前就会拒绝。想缩放更多就重复这一步。
+
 Jev 遇到 HTTP 504 `runner_source_timeout` 时，会按响应中的
 `retry_after_secs` 等待 1–60 秒，仅重试一次读取，让服务端返回有界树。
 不会重放前一步点击。操作后的读取恢复失败时返回 `status:"blocked"`，

@@ -427,6 +427,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"swipe","x1":0.5,"y1":0.8,"x2":0.5,"y2":0.2}    // also drag (+hold_ms), longpress (+duration_ms)
 {"type":"drag","points":[{"x":0.3,"y":0.4},{"x":0.13,"y":0.5,"dwell_ms":900},{"x":0.5,"y":0.4}],"hold_ms":400,"duration_ms":300}
 {"type":"multi_longpress","points":[{"x":0.3,"y":0.5},{"x":0.5,"y":0.5},{"x":0.7,"y":0.5}],"duration_ms":1500}
+{"type":"pinch","x":0.5,"y":0.5,"scale":0.7}            // two-finger pinch: <1 zooms out, >1 zooms in
 {"type":"back"}                                         // left-edge swipe, not a Back button
 {"type":"alert","button":"允许"}                        // or "action":"accept"|"dismiss"
 {"type":"picker","column":0,"value":"2026"}
@@ -489,6 +490,17 @@ are validated before sending; no single-finger fallback is used. In MCP
 `fingers` other than 1; use explicit points for multiple fingers. This release
 has automated protocol tests; recognition by a particular real iPhone app
 still requires device acceptance.
+
+**Pinch.** `pinch` puts two fingers on a line through normalized `x`/`y`
+(default 0.5/0.5) and moves them together (`scale` below 1, zoom out) or apart
+(`scale` above 1, zoom in), in one runner request. `scale` is the end gap over
+the start gap, 0.2–5 and not within 0.05 of 1. Optional: `angle` (degrees,
+0 = horizontal fingers), `spread` (the wider gap as a fraction of the shorter
+screen side, 0.1–0.9, default 0.6), `duration_ms` (100–2000, default 500). The
+fingers stay out of the 44pt screen-edge bands; near an edge the gap shrinks
+symmetrically so the centre and scale are kept, and a pinch that cannot fit
+(fingers closer than 40pt) is refused with nothing sent. For a stronger zoom
+repeat the step. MCP `phone_run_steps` and saved flows use `kind:"pinch"`.
 
 **Continuous drag.** `drag` accepts either the existing `x1/y1/x2/y2` form or
 `points` (2–16 normalized stops), never both. Each point's `dwell_ms` (default 0)
@@ -1107,7 +1119,7 @@ update / publish / report`, and the device tools `phone_logs`, `phone_crashes`,
   (`<owner>-<n>`).
 - Not in MCP: `set_value`, `keyboard`, element/page `scroll`, uninstall
   (except `phone_install_app fresh=true`), intents. `launch_app`, `open_url`, `alert`, `picker`, `perform`, `swipe`,
-  `drag`, `longpress`, `multi_longpress`, `back` exist only as `phone_run_steps` step kinds.
+  `drag`, `longpress`, `multi_longpress`, `pinch`, `back` exist only as `phone_run_steps` step kinds.
 
 ## Task metrics, runs and advice
 
@@ -1359,7 +1371,7 @@ target and inputs.
 
 Top-level fields are closed (unknown fields are rejected): `version, name,
 description, inputs, steps, app, category, risk, locale, tags, verified_on,
-app_version_min, example_inputs`. Step kinds: `tap, longpress, multi_longpress, swipe, drag,
+app_version_min, example_inputs`. Step kinds: `tap, longpress, multi_longpress, pinch, swipe, drag,
 tap_label, tap_locator, type, key, shortcut, scroll, launch_app, back, alert,
 picker, wait_for, pause`. `wait_for.expect` takes `application`, `present[]`,
 `absent[]`. Only a `type` step may reference an input (`"input":"name"`), and

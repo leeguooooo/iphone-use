@@ -301,6 +301,10 @@ The 2–5 distinct normalized points determine the finger count. Duration is
 saved flows use `kind`. Never send `fingers:3` with ordinary `longpress`.
 App-specific gesture recognition requires real-device verification.
 
+To zoom a photo cropper or map, pinch: `{"kind":"pinch","x":0.5,"y":0.5,"scale":0.7}`
+(scale <1 zooms out, >1 zooms in; 0.2–5; optional `angle`, `spread`, `duration_ms`
+100–2000). Repeat the step for more zoom. HTTP uses `type:"pinch"`.
+
 Jev retries only one observation on HTTP 504 `runner_source_timeout`, after
 the server's 1–60 second `retry_after_secs`. It never replays the preceding
 action. If post-action observation recovery fails, inspect `status:"blocked"`,

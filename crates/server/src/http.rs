@@ -5856,6 +5856,7 @@ const CAPABILITY_SINGLE_STEP_ACTIONS: &[&str] = &[
     "open_url",
     "perform",
     "picker",
+    "pinch",
     "scroll",
     "set_value",
     "shortcut",
@@ -5912,6 +5913,18 @@ const ACTION_TYPE_GUESSES: &[(&[&str], &str)] = &[
         ],
         r#"{"type":"open_url","url":"https://example.com/page"} (http/https always; other schemes only when the phone owner allows them)"#,
     ),
+    (
+        &[
+            "zoom",
+            "zoom_in",
+            "zoom_out",
+            "pinch_zoom",
+            "pinch_in",
+            "pinch_out",
+            "two_finger_zoom",
+        ],
+        r#"{"type":"pinch","x":0.5,"y":0.5,"scale":0.7} (scale below 1 zooms out, above 1 zooms in)"#,
+    ),
     (&["go_back", "navigate_back"], r#"{"type":"back"}"#),
     (&["press_home", "home_button"], r#"{"type":"home"}"#),
     (
@@ -5946,6 +5959,7 @@ const CAPABILITY_BATCH_ACTIONS: &[&str] = &[
     "open_url",
     "perform",
     "picker",
+    "pinch",
     "scroll",
     "set_value",
     "shortcut",
@@ -10456,6 +10470,39 @@ async fn runner_control_with_client(
             }
             .await
         }
+        "pinch" => {
+            let pinch = match core::pinch::Pinch::parse(v) {
+                Ok(pinch) => pinch,
+                Err(hint) => return RunnerControlOutcome::InvalidValue(hint),
+            };
+            let (sw, sh) = match w.window_size().await {
+                Ok(size) => size,
+                Err(error) => {
+                    w.invalidate_session();
+                    tracing::warn!("runner control (pinch) failed before dispatch: {error:#}");
+                    return RunnerControlOutcome::NotSent;
+                }
+            };
+            let band = core::pinch::Band {
+                x: scroll_edge_band(sw),
+                y: scroll_edge_band(sh),
+            };
+            let strokes = match pinch.strokes(sw, sh, band) {
+                Ok(strokes) => strokes.map(|s| (s.from, s.to)),
+                Err(hint) => return RunnerControlOutcome::InvalidValue(hint),
+            };
+            if refuse_scroll_alert(w, guard_alert, detail).await {
+                return RunnerControlOutcome::Refused("alert_present", SCROLL_ALERT_HINT);
+            }
+            tracing::info!(
+                "pinch: scale {:.2} at ({:.0},{:.0}) over {} ms",
+                pinch.scale,
+                pinch.x * sw,
+                pinch.y * sh,
+                pinch.duration_ms
+            );
+            w.move_fingers(&strokes, pinch.duration_ms).await
+        }
         "longpress"
             if v.get("fingers").is_some_and(|f| f.as_u64() != Some(1))
                 || v.get("points").is_some() =>
@@ -12520,6 +12567,11 @@ fn validate_agent_action_value(
                 return invalid("multi_longpress needs 2–5 distinct normalized points and duration_ms from 1 to 10000");
             }
         }
+        "pinch" => {
+            if let Err(hint) = core::pinch::Pinch::parse(&serde_json::Value::Object(action.clone())) {
+                return invalid(hint);
+            }
+        }
         "longpress" => {
             if action.get("fingers").is_some_and(|f| f.as_u64() != Some(1))
                 || action.get("points").is_some()
@@ -14094,6 +14146,13 @@ async fn agent_actions_scoped(
                         None,
                     );
                     copy_app_lifecycle_receipt(&mut body, step_detail.as_ref());
+                    // The correction for a refused value (e.g. a pinch centre in the
+                    // edge zone vs. fingers too close) is what the caller acts on.
+                    if let RunnerControlOutcome::InvalidValue(hint) = &outcome {
+                        if body.get("hint").is_none() {
+                            body["hint"] = serde_json::Value::String((*hint).to_string());
+                        }
+                    }
                     if let Some(replacement) = step_detail.as_ref().and_then(|d| d.get("replacement")) {
                         body["replacement"] = replacement.clone();
                     }
@@ -23474,13 +23533,13 @@ mod tests {
             .next()
             .unwrap();
         assert!(shared.contains("scroll_snapshot_element(w, v, guard_alert, detail)"));
-        // Page, coordinate, two-point and path gestures each have a gate; element has its own.
+        // Page, coordinate, two-point, path and pinch gestures each have a gate; element has its own.
         assert_eq!(
             shared
                 .split("refuse_scroll_alert(w, guard_alert, detail).await")
                 .count()
                 - 1,
-            4
+            5
         );
         for typ in ["scroll", "swipe", "drag"] {
             let block =

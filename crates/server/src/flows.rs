@@ -480,6 +480,7 @@ pub fn convert_action(action: &Value, rows: Option<&[crate::runner::ElementRow]>
         "drag" => copy("drag", &["x1", "y1", "x2", "y2", "points", "hold_ms", "duration_ms"]),
         "longpress" => copy("longpress", &["x", "y", "duration_ms"]),
         "multi_longpress" => copy("multi_longpress", &["points", "duration_ms"]),
+        "pinch" => copy("pinch", &["x", "y", "scale", "angle", "spread", "duration_ms"]),
         "alert" => copy("alert", &["button", "action"]),
         "picker" => copy("picker", &["column", "value"]),
         other => Converted::Unsupported(format!(
