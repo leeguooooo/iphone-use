@@ -17,6 +17,9 @@ use crate::timing::SendTimed as _;
 use anyhow::{anyhow, Context, Result};
 use std::time::Duration;
 
+/// One finger's straight travel, runner points: `(from, to)`.
+pub type FingerStroke = ((f64, f64), (f64, f64));
+
 fn bounded_move_duration_ms(duration_ms: u64) -> u64 {
     duration_ms.clamp(80, 2_000)
 }
@@ -1556,7 +1559,7 @@ impl RunnerClient {
     /// momentum past the end of the gesture.
     pub async fn move_fingers(
         &mut self,
-        strokes: &[((f64, f64), (f64, f64))],
+        strokes: &[FingerStroke],
         duration_ms: u64,
     ) -> Result<()> {
         anyhow::ensure!(
