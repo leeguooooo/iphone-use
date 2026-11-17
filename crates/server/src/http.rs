@@ -10739,6 +10739,11 @@ fn input_target_refusal(error: &anyhow::Error) -> Option<RunnerControlOutcome> {
             "no_focused_field",
             "no single text field has keyboard focus, so nothing was typed; tap the field you mean (or use set_value with its element) and type again",
         ))
+    } else if message.starts_with("input_target_secure_field_requires_human") {
+        Some(RunnerControlOutcome::Refused(
+            "secure_field_use_set_value",
+            "the focused field is a password field, which free typing never fills, so nothing was typed; send set_value with the field's element and snapshot from a fresh elements read (its value cannot be read back, so check the screen), or use phone_login (POST /agent/login) to sign in from the password vault",
+        ))
     } else if message.starts_with("newline_requires_multiline_field") {
         Some(RunnerControlOutcome::Refused(
             "newline_requires_multiline_field",
@@ -30875,6 +30880,10 @@ mod tests {
         assert!(matches!(
             input_target_refusal(&runner("newline_requires_multiline_field; nothing was sent")),
             Some(RunnerControlOutcome::Refused("newline_requires_multiline_field", _))
+        ));
+        assert!(matches!(
+            input_target_refusal(&runner("input_target_secure_field_requires_human; nothing was sent")),
+            Some(RunnerControlOutcome::Refused("secure_field_use_set_value", hint)) if hint.contains("set_value")
         ));
         // Other refusals keep the generic path; a refusal that may have sent is never renamed.
         assert!(input_target_refusal(&runner("input_target_tree_incomplete; nothing was sent")).is_none());

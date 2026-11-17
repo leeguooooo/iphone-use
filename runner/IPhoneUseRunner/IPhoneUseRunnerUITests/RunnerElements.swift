@@ -435,20 +435,26 @@ enum InputTargetCheck {
 /// whole tree (parents, AX elements), so entries are bounded by count and dropped by age when the
 /// screen may have changed.
 final class ElementRegistry {
-  private var entries: [String: (node: UINode, at: Date)] = [:]
+  private var entries: [String: (node: UINode, at: Date, owner: Int32?)] = [:]
   private var order: [String] = []
   let capacity: Int
+  /// The process that serves an AX element, read once when it is registered.
+  private let processOf: (AnyObject) -> Int32
   /// Ids older than this are dropped at the next screen-changing request. Callers use an id
   /// right after finding it; an old one points at a screen that is likely gone.
   static let maxAgeSeconds = 60.0
 
-  init(capacity: Int = 1000) { self.capacity = capacity }
+  init(capacity: Int = 1000, processOf: @escaping (AnyObject) -> Int32 = { _ in 0 }) {
+    self.capacity = capacity
+    self.processOf = processOf
+  }
 
   var count: Int { entries.count }
 
   func register(_ node: UINode, now: Date = Date()) -> String {
     let id = UUID().uuidString
-    entries[id] = (node, now)
+    let owner = node.axElement.map(processOf).flatMap { $0 > 0 ? $0 : nil }
+    entries[id] = (node, now, owner)
     order.append(id)
     if order.count > capacity {
       let drop = max(1, capacity / 4)
@@ -460,10 +466,15 @@ final class ElementRegistry {
 
   func node(_ id: String) -> UINode? { entries[id]?.node }
 
+  /// The process that served this element when it was registered. Web content and remote views
+  /// (the document picker, SafariViewService) are served by a process other than the app whose
+  /// tree holds them.
+  func owner(_ id: String) -> Int32? { entries[id]?.owner }
+
   /// Only acknowledged activity on a still-live handle can extend its lifetime.
   func renew(_ id: String, node: UINode, now: Date = Date()) {
     guard let entry = entries[id], now.timeIntervalSince(entry.at) <= Self.maxAgeSeconds else { return }
-    entries[id] = (node, now)
+    entries[id] = (node, now, entry.owner)
     order.removeAll { $0 == id }
     order.append(id)
   }
@@ -478,6 +489,15 @@ final class ElementRegistry {
       cut += 1
     }
     if cut > 0 { order.removeFirst(cut) }
+  }
+}
+
+/// Whether a retained AX element is still served by the process it came from. Its process is the
+/// app whose tree held it, or, for web content and remote views, the process that served it when it
+/// was registered. A pid of 0 is never live.
+enum ElementOwnership {
+  static func live(current: Int32, app: Int32, registered: Int32?) -> Bool {
+    current > 0 && app > 0 && (current == app || current == registered)
   }
 }
 

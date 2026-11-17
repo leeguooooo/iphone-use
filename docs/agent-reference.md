@@ -727,6 +727,15 @@ is no longer cached). The action result and the observation are separate facts:
   30000 (60000 for an OCR wait), `poll_ms` 50–1000, `pause` and `after_ms` at
   most 3000, and every wait and pause in one batch together at most 60000 ms.
   A longer wait is several batches.
+- Password fields (`SecureTextField`) refuse free typing with
+  `secure_field_use_set_value`. Send `set_value` with the field's element and
+  snapshot; its value cannot be read back, so check the screen. `phone_login`
+  (`POST /agent/login`) signs in from the password vault.
+- Web content and remote views (the system document picker, a web sign-in sheet)
+  are served by a process other than the app. Element taps reach them. The
+  document picker's search field takes keyboard focus in another process, so
+  typing there is refused with `no_focused_field`; open folders with element
+  taps instead.
 - Send one action at a time to a phone. Parallel calls (several tool calls in one
   turn) queue on the same device runner in no fixed order, and each one's
   `observe` result can include the others' changes. Put several actions in one

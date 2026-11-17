@@ -36,7 +36,7 @@ final class RunnerTests: XCTestCase {
   /// The one session id this runner hands out; any id is accepted in session paths.
   static let sessionID = UUID().uuidString
   static let systemVersion = UIDevice.current.systemVersion
-  let elements = ElementRegistry()
+  let elements = ElementRegistry(processOf: { IPURBridge.pid(forAXElement: $0) })
   var inputBinding: String?
   /// Holds off Auto-Lock while the daemon says the phone is in use (`POST /wda/keepawake`).
   let keepAwake = KeepAwake()
