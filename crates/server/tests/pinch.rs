@@ -128,5 +128,18 @@ fn invalid_pinches_send_no_runner_mutations() {
             let (status, response) = post_to(runner.url(), "/agent/input", action.clone()).await;
             assert!(status.is_client_error(), "{action}: {status} {response}");
         }
+        // A batch refusal keeps the geometry correction the caller acts on.
+        let edge = serde_json::json!({"type":"pinch","scale":0.7,"x":0.03,"y":0.5});
+        let (status, response) = post_to(
+            runner.url(),
+            "/agent/actions",
+            serde_json::json!({"steps":[{"kind":"action","action":edge}]}),
+        )
+        .await;
+        assert!(status.is_client_error(), "{status} {response}");
+        assert!(
+            response["hint"].as_str().is_some_and(|h| h.contains("edge")),
+            "{response}"
+        );
     });
 }

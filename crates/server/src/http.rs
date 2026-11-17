@@ -14146,6 +14146,13 @@ async fn agent_actions_scoped(
                         None,
                     );
                     copy_app_lifecycle_receipt(&mut body, step_detail.as_ref());
+                    // The correction for a refused value (e.g. a pinch centre in the
+                    // edge zone vs. fingers too close) is what the caller acts on.
+                    if let RunnerControlOutcome::InvalidValue(hint) = &outcome {
+                        if body.get("hint").is_none() {
+                            body["hint"] = serde_json::Value::String((*hint).to_string());
+                        }
+                    }
                     if let Some(replacement) = step_detail.as_ref().and_then(|d| d.get("replacement")) {
                         body["replacement"] = replacement.clone();
                     }
