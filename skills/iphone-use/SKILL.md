@@ -195,6 +195,8 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" -d '
 | Take a screenshot after every step | `observe:true` / `?return=delta` returns the change |
 | One tap per call when the next steps are visible | One `phone_run_steps` / `/agent/actions` batch with `wait_for` |
 | `sleep` a fixed number of seconds | `wait_for` with `present` / `absent` / `application` (`ocr_present` when the screen is a canvas) |
+| Several phone tools in parallel in one turn | One action at a time per phone: parallel calls run in no fixed order and their `observe` results overlap; put several actions in one batch |
+| A `wait_for` longer than 30 s or a `pause` longer than 3 s | Both are refused before anything is sent. `wait_for` `timeout_ms` is at most 30000 (60000 for `ocr_*`); `pause` / `after_ms` at most 3000; all waits in one batch add up to at most 60000. Split a longer wait into several batches |
 | Tap a system alert's button | The `alert` action (`button` or `action`) |
 | Tap a switch or slider | `perform` `toggle` / `adjust` |
 | Resend after `outcome_unknown` or `retry_safe:false` | Read the screen first; the phone may already have acted |

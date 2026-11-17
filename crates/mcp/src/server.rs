@@ -561,8 +561,10 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// Poll until `expect` holds (timeout_ms default 15000, poll_ms 250);
-    /// timeout_ms:0 is one 500 ms observation without polling.
+    /// Poll until `expect` holds (timeout_ms default 15000, at most 30000, or
+    /// 60000 with ocr_present/ocr_absent; poll_ms default 250, 50..1000);
+    /// timeout_ms:0 is one 500 ms observation without polling. All waits and
+    /// pauses in one batch add up to at most 60000 ms; split longer waits.
     WaitFor {
         expect: PhoneUiExpectation,
         #[serde(default = "default_phone_wait_ms")]
@@ -570,7 +572,7 @@ pub enum PhoneStep {
         #[serde(default = "default_phone_poll_ms")]
         poll_ms: u64,
     },
-    /// Fixed pause; prefer `wait_for`.
+    /// Fixed pause, 1..3000 ms; prefer `wait_for`.
     Pause { ms: u64 },
 }
 
@@ -4022,7 +4024,8 @@ impl ServerHandler for PhoneHandler {
                  live panel; phone_screenshot is one model-visible image; phone_screen_frame belongs only to \
                  the panel. Screenshots only when pixels matter. Diagnostic/install/recording tools are for \
                  tasks that request those capabilities, not ordinary navigation.\n\
-                 4. Verify each step; `retry_safe:false` means never replay.\n\
+                 4. Verify each step; `retry_safe:false` means never replay. One action at a time per phone: \
+                 parallel phone tool calls run in no fixed order and their observations overlap; batch them instead.\n\
                  5. A response carrying `flow_suggestion`, or any finished multi-step task with no flow: \
                  ASK THE USER whether to save it. Only if they agree: phone_flow_draft, fix its todo list, \
                  phone_flow_run the file once, then phone_flow_publish(confirm=true) with their OK.\n\
