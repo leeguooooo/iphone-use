@@ -369,6 +369,28 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
+    /// Two-finger pinch around normalized (x,y) (default the screen centre):
+    /// `scale` below 1 zooms out (fingers close), above 1 zooms in (fingers
+    /// open); 0.2–5, not within 0.05 of 1. `angle` is the finger line in
+    /// degrees (0 = horizontal); `spread` the wider finger gap as a fraction
+    /// of the shorter screen side (0.1–0.9, default 0.6); duration_ms
+    /// 100–2000, default 500. For a stronger zoom, repeat the step.
+    Pinch {
+        #[serde(default = "default_phone_pinch_center")]
+        x: f64,
+        #[serde(default = "default_phone_pinch_center")]
+        y: f64,
+        scale: f64,
+        #[serde(default)]
+        angle: f64,
+        #[serde(default = "default_phone_pinch_spread")]
+        spread: f64,
+        #[serde(default = "default_phone_pinch_ms")]
+        duration_ms: u64,
+        /// Pause after this step, ms.
+        #[serde(default)]
+        after_ms: u64,
+    },
     /// Swipe from (x1,y1) to (x2,y2), normalized; duration_ms default 300.
     Swipe {
         x1: f64,
@@ -613,6 +635,18 @@ fn default_phone_longpress_ms() -> u64 {
 
 fn default_phone_multi_longpress_ms() -> u64 {
     1000
+}
+
+fn default_phone_pinch_center() -> f64 {
+    0.5
+}
+
+fn default_phone_pinch_spread() -> f64 {
+    iu_core::pinch::DEFAULT_SPREAD
+}
+
+fn default_phone_pinch_ms() -> u64 {
+    iu_core::pinch::DEFAULT_DURATION_MS
 }
 
 fn default_phone_swipe_ms() -> u64 {
@@ -4146,6 +4180,22 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
                     after_ms,
                 )
             }
+            PhoneStep::Pinch {
+                x,
+                y,
+                scale,
+                angle,
+                spread,
+                duration_ms,
+                after_ms,
+            } => {
+                validate_after(after_ms)?;
+                let action = serde_json::json!({"type":"pinch","x":x,"y":y,"scale":scale,
+                    "angle":angle,"spread":spread,"duration_ms":duration_ms});
+                iu_core::pinch::Pinch::parse(&action)
+                    .map_err(|error| format!("steps[{index}] {error}; no action was sent"))?;
+                action_step(action, after_ms)
+            }
             PhoneStep::Swipe {
                 x1,
                 y1,
@@ -4900,6 +4950,27 @@ mod tests {
             serde_json::json!({"kind":"type_continue","continue_token":token,"text":"forbidden"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn pinch_steps_default_the_centre_and_refuse_a_scale_that_zooms_nothing() {
+        let encode = |v| phone_steps_request(vec![serde_json::from_value::<PhoneStep>(v).unwrap()]);
+        let request = encode(serde_json::json!({"kind":"pinch","scale":0.7})).unwrap();
+        let action = &request["steps"][0]["action"];
+        assert_eq!(action["type"], "pinch");
+        assert_eq!(action["x"], 0.5);
+        assert_eq!(action["y"], 0.5);
+        assert_eq!(action["scale"], 0.7);
+        assert_eq!(action["duration_ms"], 500);
+        for bad in [
+            serde_json::json!({"kind":"pinch","scale":1.0}),
+            serde_json::json!({"kind":"pinch","scale":9}),
+            serde_json::json!({"kind":"pinch","scale":1.4,"x":1.5}),
+            serde_json::json!({"kind":"pinch","scale":1.4,"duration_ms":10000}),
+        ] {
+            assert!(encode(bad).is_err());
+        }
+        assert!(serde_json::from_value::<PhoneStep>(serde_json::json!({"kind":"pinch"})).is_err());
     }
 
     #[test]

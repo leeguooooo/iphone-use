@@ -8,6 +8,7 @@ pub mod clock;
 pub mod control;
 pub mod drag;
 pub mod home_layout;
+pub mod pinch;
 pub mod env;
 pub mod progress;
 pub mod runner_auth;

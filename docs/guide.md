@@ -647,6 +647,22 @@ sent, and a failure never degrades to one finger; a plain `longpress` with `fing
 refused. The protocol and batching are covered by automated tests; whether a given app
 recognises the gesture still needs a check on hardware.
 
+### Pinch to zoom
+
+Photo croppers and maps that only zoom with two fingers take `kind:"pinch"`
+(HTTP `type:"pinch"`):
+
+```json
+{"kind":"pinch","x":0.5,"y":0.5,"scale":0.7}
+```
+
+`scale` below 1 pinches in (zoom out), above 1 spreads out (zoom in); 0.2–5, not
+within 0.05 of 1. `x`/`y` is the centre (default the screen centre), `angle` the
+finger line in degrees (0 = horizontal), `spread` the wider finger gap as a fraction
+of the shorter screen side (default 0.6), `duration_ms` 100–2000 (default 500). The
+fingers keep out of the screen-edge bands; a pinch that cannot fit is refused before
+anything is sent. Repeat the step for a stronger zoom.
+
 When Jev gets HTTP 504 `runner_source_timeout`, it waits the response's `retry_after_secs`
 (1–60 s) and retries the read once, so the server can answer with a bounded tree; it never
 replays the previous tap. If the read after an action still fails, Jev answers

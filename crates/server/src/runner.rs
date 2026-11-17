@@ -1549,6 +1549,49 @@ impl RunnerClient {
         Ok(())
     }
 
+    /// Several fingers that go down together, each travel a straight line over
+    /// the same `duration_ms`, rest, and lift together: one synthesized
+    /// gesture (a pinch is two strokes). Coordinates are runner points. The
+    /// short rest before lifting keeps a scroll view from carrying zoom or pan
+    /// momentum past the end of the gesture.
+    pub async fn move_fingers(
+        &mut self,
+        strokes: &[((f64, f64), (f64, f64))],
+        duration_ms: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            (2..=5).contains(&strokes.len()),
+            "a multi-finger move needs 2–5 strokes"
+        );
+        let actions: Vec<_> = strokes
+            .iter()
+            .enumerate()
+            .map(|(i, &((x1, y1), (x2, y2)))| {
+                serde_json::json!({
+                    "type":"pointer", "id":format!("finger{}", i + 1),
+                    "parameters":{"pointerType":"touch"},
+                    "actions":[
+                        {"type":"pointerMove", "duration":0, "x":x1, "y":y1},
+                        {"type":"pointerDown", "button":0},
+                        {"type":"pause", "duration":50},
+                        {"type":"pointerMove", "duration":bounded_move_duration_ms(duration_ms), "x":x2, "y":y2},
+                        {"type":"pause", "duration":120},
+                        {"type":"pointerUp", "button":0}
+                    ]
+                })
+            })
+            .collect();
+        let sid = self.ensure_session().await?.to_string();
+        let response = self
+            .post_req(format!("{}/session/{}/actions", self.base, sid))
+            .json(&serde_json::json!({"actions":actions}))
+            .send_signed(&self.auth)
+            .await
+            .context("POST /actions (multi-finger move)")?;
+        ensure_runner_success(response, "POST /actions (multi-finger move)").await?;
+        Ok(())
+    }
+
     /// Read the current runner, without caching across a runner replacement.
     /// Old runners accept W3C pauses but interpolate through them.
     pub async fn supports_timed_drag_path(&mut self) -> Result<bool> {
