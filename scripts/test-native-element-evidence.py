@@ -24,6 +24,7 @@ enum RunnerElementTypes { static func rawValue(of name: String) -> Int { 1 } }
 '''
 program += block((BASE / 'RunnerHTTP.swift').read_text(), 'struct RunnerError: Error') + '\n'
 program += block(elements, 'final class UINode {') + '\n'
+program += block(elements, 'enum ElementOwnership {') + '\n'
 # Inject only clock/wait dependencies: exercise the production sampling state
 # machine without assuming the CI scheduler can run four AX reads in 200 ms.
 clocked = block(elements, 'enum ElementFrameStability {')
@@ -42,7 +43,9 @@ struct HTTPResponse {
 }
 final class Registry {
   var stored: UINode?
+  var registeredOwner: Int32?
   func node(_ id: String) -> UINode? { stored }
+  func owner(_ id: String) -> Int32? { registeredOwner }
 }
 enum IPURBridge {
   static var pid: Int32 = 42
@@ -186,6 +189,13 @@ let absent = probe(); absent.elements.stored = nil
 refused(404) { _ = try absent.elementSubtree("E",HTTPRequest()) }
 let stalePID = probe(); IPURBridge.pid = 7
 refused(404) { _ = try stalePID.elementSubtree("E",HTTPRequest()) }
+// Web content and remote views are served by another process, recorded at registration.
+IPURBridge.pid = 42
+let remote = probe(); remote.elements.registeredOwner = 7; IPURBridge.pid = 7
+_ = try! remote.elementSubtree("E",HTTPRequest())
+let movedRemote = probe(); movedRemote.elements.registeredOwner = 7; IPURBridge.pid = 9
+refused(404) { _ = try movedRemote.elementSubtree("E",HTTPRequest()) }
+IPURBridge.pid = 42
 let noAX = probe(node(handle:false))
 refused(501) { _ = try noAX.elementSubtree("E",HTTPRequest()) }
 require(IPURBridge.calls.isEmpty,"missing AX fell back")

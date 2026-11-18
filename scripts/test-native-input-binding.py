@@ -24,7 +24,7 @@ methods = '\n'.join(block(routes, '  private func ' + name + '(').replace('priva
                     for name in ['inputTarget', 'checkInputTarget', 'checkedInputTarget',
                                  'boundKeys', 'boundClearState', 'clearBoundInput',
                                  'selectedInputTarget', 'checkedReplacementTarget', 'focusReplacementTarget'])
-helpers = block((SOURCE / 'RunnerElements.swift').read_text(), 'enum InputTargetCheck')
+helpers = block((SOURCE / 'RunnerElements.swift').read_text(), 'enum InputTargetCheck') + '\n' + block((SOURCE / 'RunnerElements.swift').read_text(), 'enum ElementOwnership {')
 error = block((SOURCE / 'RunnerHTTP.swift').read_text(), 'struct RunnerError: Error')
 program = r'''
 import Foundation
@@ -65,6 +65,7 @@ final class Registry {
   func register(_ node: UINode) -> String { let id = UUID().uuidString; entries[id] = node; return id }
   func prune() {}
   func renew(_ id:String, node:UINode) { if entries[id] != nil { entries[id] = node } }
+  func owner(_ id:String) -> Int32? { nil }
 }
 var shortKeys: String? = "delete"
 var canSelect = true

@@ -723,6 +723,23 @@ is no longer cached). The action result and the observation are separate facts:
 - Keep `pause` for short animation gaps (maximum 3000 ms). For a slow page such
   as iPhone Storage, use a semantic `wait_for` with `timeout_ms:30000` on the
   expected result instead of chaining pauses.
+- Limits, all refused before anything is sent: `wait_for` `timeout_ms` at most
+  30000 (60000 for an OCR wait), `poll_ms` 50–1000, `pause` and `after_ms` at
+  most 3000, and every wait and pause in one batch together at most 60000 ms.
+  A longer wait is several batches.
+- Password fields (`SecureTextField`) refuse free typing with
+  `secure_field_use_set_value`. Send `set_value` with the field's element and
+  snapshot; its value cannot be read back, so check the screen. `phone_login`
+  (`POST /agent/login`) signs in from the password vault.
+- Web content and remote views (the system document picker, a web sign-in sheet)
+  are served by a process other than the app. Element taps reach them. The
+  document picker's search field takes keyboard focus in another process, so
+  typing there is refused with `no_focused_field`; open folders with element
+  taps instead.
+- Send one action at a time to a phone. Parallel calls (several tool calls in one
+  turn) queue on the same device runner in no fixed order, and each one's
+  `observe` result can include the others' changes. Put several actions in one
+  batch instead.
 - Canvas screens (games, Flutter/Unity) have no labels to wait on. Wait for
   their text by OCR instead: `{"kind":"wait_for","expect":{"ocr_present":["长按自动"]},"timeout_ms":60000}`
   (`ocr_absent` for a caption that must disappear, e.g. `Loading`). Each entry

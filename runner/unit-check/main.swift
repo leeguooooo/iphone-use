@@ -843,6 +843,13 @@ do {
   check(renewed.node(active) == nil, "renewal cannot revive an already expired handle")
   renewed.renew("missing", node: tree, now: start.addingTimeInterval(122))
   check(renewed.count == 0, "renewal cannot create an unknown handle")
+  check(ElementOwnership.live(current: 7, app: 7, registered: nil), "an element of the app itself is live")
+  check(ElementOwnership.live(current: 9, app: 7, registered: 9),
+        "web content or a remote view stays live while the process that served it serves it")
+  check(!ElementOwnership.live(current: 9, app: 7, registered: nil), "an unrecorded foreign process is not live")
+  check(!ElementOwnership.live(current: 11, app: 7, registered: 9), "a different serving process is not live")
+  check(!ElementOwnership.live(current: 0, app: 7, registered: 0), "pid 0 is never live")
+  check(!ElementOwnership.live(current: 7, app: 0, registered: 7), "an element without an app pid is not live")
 }
 
 // MARK: - Request signing (RunnerAuth)
