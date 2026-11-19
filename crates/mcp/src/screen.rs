@@ -13,7 +13,7 @@
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rmcp::model::{
-    AnnotateAble, CallToolResult, Content, Meta, RawResource, Resource, ResourceContents, Tool,
+    CallToolResult, ContentBlock, MetaObject, Resource, ResourceContents, Tool,
 };
 use serde_json::{json, Value};
 
@@ -42,10 +42,10 @@ pub fn screen_uri() -> String {
     format!("ui://iphone-use/screen-{}.html", env!("CARGO_PKG_VERSION"))
 }
 
-fn meta(value: Value) -> Meta {
+fn meta(value: Value) -> MetaObject {
     match value {
-        Value::Object(map) => Meta(map),
-        _ => Meta::new(),
+        Value::Object(map) => MetaObject(map),
+        _ => MetaObject::new(),
     }
 }
 
@@ -57,7 +57,7 @@ pub fn html() -> String {
 
 /// `_meta` on the resource and its contents. No `csp`: the host default
 /// (inline script, `data:` images, no network) is exactly what the page needs.
-fn resource_meta() -> Meta {
+fn resource_meta() -> MetaObject {
     meta(json!({ "ui": { "prefersBorder": false } }))
 }
 
@@ -79,7 +79,7 @@ pub fn decorate_tools(tools: Vec<Tool>) -> Vec<Tool> {
                 None
             };
             if let Some(Value::Object(extra)) = extra {
-                tool.meta.get_or_insert_with(Meta::new).0.extend(extra);
+                tool.meta.get_or_insert_with(MetaObject::new).0.extend(extra);
             }
             tool
         })
@@ -88,13 +88,13 @@ pub fn decorate_tools(tools: Vec<Tool>) -> Vec<Tool> {
 
 /// `resources/list`.
 pub fn resources() -> Vec<Resource> {
-    let mut resource = RawResource::new(screen_uri(), "iphone-use-screen");
+    let mut resource = Resource::new(screen_uri(), "iphone-use-screen");
     resource.title = Some("iPhone screen".into());
     resource.description =
         Some("Live view of the iPhone being driven, with Home and refresh buttons.".into());
     resource.mime_type = Some(MIME.into());
     resource.meta = Some(resource_meta());
-    vec![resource.no_annotation()]
+    vec![resource]
 }
 
 /// `resources/read`; `None` for any other URI.
@@ -111,7 +111,7 @@ pub fn read(uri: &str) -> Option<ResourceContents> {
 pub fn with_panel_session(mut result: CallToolResult) -> CallToolResult {
     result
         .meta
-        .get_or_insert_with(Meta::new)
+        .get_or_insert_with(MetaObject::new)
         .0
         .insert("openai/widgetSessionId".into(), json!(WIDGET_SESSION_ID));
     result
@@ -198,7 +198,7 @@ pub fn frame_result(
         map.insert("frame".into(), frame);
         map.insert("error".into(), json!(status_error.or(frame_error)));
     }
-    let mut result = CallToolResult::success(vec![Content::text("iphone-use screen frame")]);
+    let mut result = CallToolResult::success(vec![ContentBlock::text("iphone-use screen frame")]);
     result.structured_content = Some(body);
     result
 }
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn panel_results_reuse_one_panel() {
-        let result = with_panel_session(CallToolResult::success(vec![Content::text("x")]));
+        let result = with_panel_session(CallToolResult::success(vec![ContentBlock::text("x")]));
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["_meta"]["openai/widgetSessionId"], WIDGET_SESSION_ID);
     }

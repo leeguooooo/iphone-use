@@ -15,7 +15,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{
-        CallToolResult, Content, Implementation, InitializeResult, ProtocolVersion,
+        CallToolResult, ContentBlock, Implementation, InitializeResult, ProtocolVersion,
         ServerCapabilities,
     },
     schemars, tool, tool_handler, tool_router, ServerHandler,
@@ -989,7 +989,7 @@ fn reconnect_on_use_stopped(tool: &str, wait: &ReconnectWait) -> CallToolResult 
         "wait": wait.json,
     })
     .to_string();
-    CallToolResult::error(vec![Content::text(text)])
+    CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
 /// What a waiting reconnect ended on.
@@ -1344,7 +1344,7 @@ impl PhoneHandler {
             .as_ref()
             .is_some_and(|json| json.get("no_progress").is_some());
         if let Some(line) = line.filter(|_| !daemon_said) {
-            result.content.push(Content::text(line));
+            result.content.push(ContentBlock::text(line));
         }
         result
     }
@@ -1482,7 +1482,7 @@ impl PhoneHandler {
     async fn phone_instances(&self) -> CallToolResult {
         let names = match crate::instances::names() {
             Ok(names) => names,
-            Err(_) => return CallToolResult::error(vec![Content::text("installed-instance discovery failed")]),
+            Err(_) => return CallToolResult::error(vec![ContentBlock::text("installed-instance discovery failed")]),
         };
         let mut rows = Vec::new();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1511,7 +1511,7 @@ impl PhoneHandler {
         }
         let body = serde_json::json!({"instances":rows,"selection":"per_call","implicit_target":"configured_daemon","scope":"installed_daemon_instances",
             "paired_device_discovery_command":"xcrun devicectl list devices"});
-        let mut result = CallToolResult::success(vec![Content::text(body.to_string())]);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(body.to_string())]);
         result.structured_content = Some(body);
         result
     }
@@ -1533,7 +1533,7 @@ impl PhoneHandler {
     async fn phone_capabilities(&self) -> CallToolResult {
         match self.daemon.capabilities().await {
             Ok(response) => daemon_read_result(&response),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "capabilities failed: {e:#}"
             ))]),
         }
@@ -1551,15 +1551,15 @@ impl PhoneHandler {
     async fn phone_metrics(&self, Parameters(params): Parameters<MetricsParams>) -> CallToolResult {
         let limit = params.limit.unwrap_or(5);
         if !(1..=20).contains(&limit) {
-            return CallToolResult::error(vec![Content::text("limit must be between 1 and 20")]);
+            return CallToolResult::error(vec![ContentBlock::text("limit must be between 1 and 20")]);
         }
         let response = match self.daemon.metrics().await {
             Ok(response) => response,
-            Err(error) => return CallToolResult::error(vec![Content::text(format!("metrics failed: {error:#}"))]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(format!("metrics failed: {error:#}"))]),
         };
         if !response.ok() { return daemon_read_result(&response); }
         let Some(body) = response.json.as_ref().filter(|body| body.get("ok").and_then(serde_json::Value::as_bool) == Some(true)) else {
-            return CallToolResult::error(vec![Content::text("metrics response did not contain a valid report")]);
+            return CallToolResult::error(vec![ContentBlock::text("metrics response did not contain a valid report")]);
         };
         let owner = self.daemon.owner().trim();
         let mut budget = 12 * 1024;
@@ -1568,19 +1568,19 @@ impl PhoneHandler {
             "truncated":false});
         for section in ["open", "recent"] {
             let Some(rows) = body.get(section).and_then(serde_json::Value::as_array) else {
-                return CallToolResult::error(vec![Content::text("metrics report is missing its open/recent arrays")]);
+                return CallToolResult::error(vec![ContentBlock::text("metrics report is missing its open/recent arrays")]);
             };
             let mut ordered = Vec::with_capacity(rows.len());
             for row in rows {
                 if row.pointer("/key/owner").and_then(serde_json::Value::as_str) != Some(owner) {
-                    return CallToolResult::error(vec![Content::text("metrics report did not match this client's owner; no run data returned")]);
+                    return CallToolResult::error(vec![ContentBlock::text("metrics report did not match this client's owner; no run data returned")]);
                 }
                 let (Some(start), Some(end), Some(incarnation)) = (
                     row.get("started_ms").and_then(serde_json::Value::as_u64),
                     row.get("ended_ms").and_then(serde_json::Value::as_u64),
                     row.pointer("/key/incarnation").and_then(serde_json::Value::as_u64),
                 ) else {
-                    return CallToolResult::error(vec![Content::text("metrics run is missing its timestamps or identity")]);
+                    return CallToolResult::error(vec![ContentBlock::text("metrics run is missing its timestamps or identity")]);
                 };
                 ordered.push(((end.max(start), incarnation), row));
             }
@@ -1589,7 +1589,7 @@ impl PhoneHandler {
             for (_, row) in ordered.into_iter().take(limit) {
                 let bytes = match serde_json::to_vec(row) {
                     Ok(bytes) => bytes.len(),
-                    Err(_) => return CallToolResult::error(vec![Content::text("could not encode metrics run")]),
+                    Err(_) => return CallToolResult::error(vec![ContentBlock::text("could not encode metrics run")]),
                 };
                 if bytes > budget { break; }
                 budget -= bytes;
@@ -1600,7 +1600,7 @@ impl PhoneHandler {
             report[format!("{section}_omitted")] = serde_json::json!(omitted);
             report[section] = serde_json::json!(selected);
         }
-        let mut result = CallToolResult::success(vec![Content::text(report.to_string())]);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(report.to_string())]);
         result.structured_content = Some(report);
         result
     }
@@ -1620,19 +1620,19 @@ impl PhoneHandler {
     ) -> CallToolResult {
         if let Some(action) = params.action {
             if *self.profile == ToolProfile::ReadOnly {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "home layout {action} is not available with {TOOLS_ENV}=readonly; call phone_home_layout without action to read"
                 ))]);
             }
             let body = serde_json::json!({"action": action, "file": params.file, "confirm": params.confirm});
             return match self.daemon.home_layout_write(body).await {
                 Ok(response) => daemon_read_result(&response),
-                Err(error) => CallToolResult::error(vec![Content::text(format!("home layout {error:#}"))]),
+                Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("home layout {error:#}"))]),
             };
         }
         match self.daemon.home_layout(params.page).await {
             Ok(response) => daemon_read_result(&response),
-            Err(error) => CallToolResult::error(vec![Content::text(format!(
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "home layout failed: {error:#}"
             ))]),
         }
@@ -1666,7 +1666,7 @@ impl PhoneHandler {
             .await
         {
             Ok(response) => daemon_read_result(&response),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "app lookup failed: {e:#}"
             ))]),
         }
@@ -1715,9 +1715,9 @@ impl PhoneHandler {
         match shot {
             Ok(bytes) if !bytes.is_empty() => {
                 let b64 = B64.encode(&bytes);
-                let mut content = vec![Content::image(b64, "image/png")];
+                let mut content = vec![ContentBlock::image(b64, "image/png")];
                 if max_side != requested {
-                    content.push(Content::text(format!(
+                    content.push(ContentBlock::text(format!(
                         "downscaled to max_side={} to fit the {} MB image budget",
                         max_side.unwrap_or_default(),
                         SCREENSHOT_BUDGET_BYTES / 1_000_000
@@ -1725,12 +1725,12 @@ impl PhoneHandler {
                 }
                 CallToolResult::success(content)
             }
-            Ok(_) => CallToolResult::error(vec![Content::text(
+            Ok(_) => CallToolResult::error(vec![ContentBlock::text(
                 "screenshot returned empty data — inspect phone_status device_state, \
                  screen_state, hint, setup_blocked_on, setup_phase, and setup_message",
             )]),
             Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("screenshot failed: {e:#}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("screenshot failed: {e:#}"))])
             }
         }
     }
@@ -1850,7 +1850,7 @@ impl PhoneHandler {
             | "down" | "left" | "right" => {
                 send_input_observed(&self.daemon, &InputMsg::Key { name }, observe).await
             }
-            _ => CallToolResult::error(vec![Content::text(format!(
+            _ => CallToolResult::error(vec![ContentBlock::text(format!(
                 "unsupported key '{name}'; supported: return/enter, escape, space, tab, \
                  delete/backspace, up, down, left, right"
             ))]),
@@ -1885,12 +1885,12 @@ impl PhoneHandler {
             "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
-            "switcher" => CallToolResult::error(vec![Content::text(
+            "switcher" => CallToolResult::error(vec![ContentBlock::text(
                 "unsupported shortcut 'switcher': the device runner cannot open \
                  the iOS App Switcher; use home, spotlight, or launch an app by a \
                  supported device action instead",
             )]),
-            _ => CallToolResult::error(vec![Content::text(format!(
+            _ => CallToolResult::error(vec![ContentBlock::text(format!(
                 "unsupported shortcut '{name}'; supported: home, spotlight, save_screenshot, volume_up, volume_down"
             ))]),
         }
@@ -1921,7 +1921,7 @@ impl PhoneHandler {
         self.progress_reset();
         let mut request = match phone_steps_request(steps) {
             Ok(request) => request,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         // Observing by default: a batch is how an agent advances, and the
         // screen it ends on is what the agent decides from next.
@@ -1959,7 +1959,7 @@ impl PhoneHandler {
                 })
                 .unwrap_or(body);
             return with_structure(
-                CallToolResult::success(vec![Content::text(text)]),
+                CallToolResult::success(vec![ContentBlock::text(text)]),
                 &response,
             );
         }
@@ -1978,7 +1978,7 @@ impl PhoneHandler {
                     crate::compact::failed_batch(&json)
                 })
                 .unwrap_or(body);
-            return with_structure(CallToolResult::error(vec![Content::text(text)]), &response);
+            return with_structure(CallToolResult::error(vec![ContentBlock::text(text)]), &response);
         }
 
         // Neither a confirmation nor a refusal: the request was answered, but
@@ -2023,11 +2023,11 @@ impl PhoneHandler {
                 }
                 let json =
                     serde_json::to_string(&s).unwrap_or_else(|_| r#"{"ok":true}"#.to_string());
-                crate::screen::with_panel_session(CallToolResult::success(vec![Content::text(
+                crate::screen::with_panel_session(CallToolResult::success(vec![ContentBlock::text(
                     json,
                 )]))
             }
-            Err(e) => CallToolResult::error(vec![Content::text(format!("status failed: {e:#}"))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("status failed: {e:#}"))]),
         }
     }
 
@@ -2053,7 +2053,7 @@ impl PhoneHandler {
             }
             Err(e) => format!("panel opened; status failed: {e:#}"),
         };
-        crate::screen::with_panel_session(CallToolResult::success(vec![Content::text(text)]))
+        crate::screen::with_panel_session(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(
@@ -2111,18 +2111,18 @@ impl PhoneHandler {
                     // Hosts may show only structuredContent when it exists.
                     // A content-only result keeps the full value visible once
                     // in every output mode, without a competing metadata copy.
-                    return CallToolResult::success(vec![Content::text(body.to_string())]);
+                    return CallToolResult::success(vec![ContentBlock::text(body.to_string())]);
                 }
                 if let Some(body) = response.json.as_ref().filter(|body| body["ok"] == false) {
                     let mut safe = body.clone();
                     if let Some(object) = safe.as_object_mut() { object.remove("value"); }
-                    let mut result = CallToolResult::error(vec![Content::text(safe.to_string())]);
+                    let mut result = CallToolResult::error(vec![ContentBlock::text(safe.to_string())]);
                     result.structured_content = Some(safe);
                     return result;
                 }
-                CallToolResult::error(vec![Content::text("full value contract unavailable; no preview was promoted to a complete value")])
+                CallToolResult::error(vec![ContentBlock::text("full value contract unavailable; no preview was promoted to a complete value")])
             }
-            Err(_) => CallToolResult::error(vec![Content::text("value read failed; no input was sent and no preview was promoted to a complete value")]),
+            Err(_) => CallToolResult::error(vec![ContentBlock::text("value read failed; no input was sent and no preview was promoted to a complete value")]),
         }
     }
 
@@ -2136,8 +2136,8 @@ impl PhoneHandler {
     )]
     async fn phone_subtree(&self, Parameters(params): Parameters<SubtreeParams>) -> CallToolResult {
         match self.daemon.subtree(&params.snapshot, params.element, params.max_depth.unwrap_or(8), params.max_nodes.unwrap_or(500)).await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(error) => CallToolResult::error(vec![Content::text(format!("subtree read failed: {error:#}"))]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("subtree read failed: {error:#}"))]),
         }
     }
 
@@ -2162,11 +2162,11 @@ impl PhoneHandler {
     ) -> CallToolResult {
         let ocr = match crate::device::ocr_param(ocr.as_deref()) {
             Ok(ocr) => ocr,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         if let Some(selector) = &selector {
             if let Err(hint) = selector.validate() {
-                return CallToolResult::error(vec![Content::text(format!("invalid selector: {hint}; nothing was sent to the daemon"))]);
+                return CallToolResult::error(vec![ContentBlock::text(format!("invalid selector: {hint}; nothing was sent to the daemon"))]);
             }
         }
         // A narrowed read is not the whole screen: it must not become the
@@ -2212,10 +2212,10 @@ impl PhoneHandler {
                 if let Ok(mut tracker) = self.progress.lock() {
                     tracker.note_screen(parsed.as_ref().filter(|_| !narrowed));
                 }
-                let mut content = vec![Content::text(text)];
+                let mut content = vec![ContentBlock::text(text)];
                 if let Some(json) = parsed.as_ref() {
                     if let (Some(png), Some(image)) = (png, json.get("image")) {
-                        content.push(Content::text(format!(
+                        content.push(ContentBlock::text(format!(
                             "image: the daemon's auto image policy attached a screenshot — \
                              source {}, requested at {} and received at {} (ms), after this \
                              snapshot was read, not the same instant{}.",
@@ -2228,14 +2228,14 @@ impl PhoneHandler {
                                 ""
                             },
                         )));
-                        content.push(Content::image(png, "image/png"));
+                        content.push(ContentBlock::image(png, "image/png"));
                     } else if json.get("image_omitted").is_some() {
-                        content.push(Content::text(
+                        content.push(ContentBlock::text(
                             "image_omitted: the screenshot would not fit the response budget; \
                              the text above is complete.",
                         ));
                     } else if json.get("image_unavailable").is_some() {
-                        content.push(Content::text(
+                        content.push(ContentBlock::text(
                             "image_unavailable: the auto image policy requested a screenshot \
                              but the capture failed; the text above is still usable.",
                         ));
@@ -2251,14 +2251,14 @@ impl PhoneHandler {
                     if error.status==reqwest::StatusCode::CONFLICT {
                         if let Ok(body)=serde_json::from_str::<serde_json::Value>(&error.body) {
                             if body.get("error").and_then(serde_json::Value::as_str)==Some("ordinal_unproven") {
-                                let mut result=CallToolResult::error(vec![Content::text(body.to_string())]);
+                                let mut result=CallToolResult::error(vec![ContentBlock::text(body.to_string())]);
                                 result.structured_content=Some(body);
                                 return result;
                             }
                         }
                     }
                 }
-                CallToolResult::error(vec![Content::text(format!(
+                CallToolResult::error(vec![ContentBlock::text(format!(
                     "elements failed: {e:#}. Call phone_status and follow its `hint`; do not retry \
                      in a loop."
                 ))])
@@ -2411,7 +2411,7 @@ impl PhoneHandler {
         let wait_secs = match params.wait_secs {
             None | Some(0) => None,
             Some(secs) if secs > RECONNECT_MAX_WAIT_SECS => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "wait_secs must be between 1 and {RECONNECT_MAX_WAIT_SECS}; nothing was sent"
                 ))]);
             }
@@ -2420,19 +2420,19 @@ impl PhoneHandler {
         let body = match self.daemon.reconnect().await {
             Ok(body) => body,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "reconnect failed: {e:#}"
                 ))])
             }
         };
         let Some(wait_secs) = wait_secs else {
-            return CallToolResult::success(vec![Content::text(body)]);
+            return CallToolResult::success(vec![ContentBlock::text(body)]);
         };
         let wait = self.wait_until_drivable(std::time::Duration::from_secs(wait_secs)).await;
         let reconnect = serde_json::from_str::<serde_json::Value>(&body)
             .unwrap_or(serde_json::Value::String(body));
         let text = serde_json::json!({"reconnect": reconnect, "wait": wait.json}).to_string();
-        CallToolResult::success(vec![Content::text(text)])
+        CallToolResult::success(vec![ContentBlock::text(text)])
     }
 
     #[tool(
@@ -2459,8 +2459,8 @@ impl PhoneHandler {
             .run_start_with_trace(&params.run_id, params.complete_trace.unwrap_or(false), params.trace)
             .await
         {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("run start failed: {e:#}"))]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("run start failed: {e:#}"))]),
         }
     }
 
@@ -2470,8 +2470,8 @@ impl PhoneHandler {
     )]
     async fn phone_run_trace(&self, Parameters(params): Parameters<RunTraceParams>) -> CallToolResult {
         match self.daemon.action_trace(&params.run_id).await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(error) => CallToolResult::error(vec![Content::text(format!("trace read failed: {error:#}"))]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("trace read failed: {error:#}"))]),
         }
     }
 
@@ -2492,8 +2492,8 @@ impl PhoneHandler {
     async fn phone_run_end(&self, Parameters(params): Parameters<RunEndParams>) -> CallToolResult {
         self.progress_reset();
         match self.daemon.run_end(&params.run_id, params.turn_ids).await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("run end failed: {e:#}"))]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("run end failed: {e:#}"))]),
         }
     }
 
@@ -2565,8 +2565,8 @@ impl PhoneHandler {
     )]
     async fn phone_hold(&self, Parameters(params): Parameters<HoldParams>) -> CallToolResult {
         match self.daemon.hold(params.secs, params.private.unwrap_or(false)).await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("hold failed: {e:#}"))]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("hold failed: {e:#}"))]),
         }
     }
 
@@ -2588,8 +2588,8 @@ impl PhoneHandler {
         // A released lease is a run boundary.
         self.progress_reset();
         match self.daemon.release_owner().await {
-            Ok(body) => CallToolResult::success(vec![Content::text(body)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("release failed: {e:#}"))]),
+            Ok(body) => CallToolResult::success(vec![ContentBlock::text(body)]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("release failed: {e:#}"))]),
         }
     }
 
@@ -2628,7 +2628,7 @@ impl PhoneHandler {
             .await
         {
             Ok(response) => daemon_read_result(&response),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("login failed: {e:#}"))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("login failed: {e:#}"))]),
         }
     }
 
@@ -2668,12 +2668,12 @@ impl PhoneHandler {
                 } else {
                     crate::compact::flow_list(&json).unwrap_or_else(|| json.to_string())
                 };
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
                 result.structured_content = Some(json);
                 result
             }
             Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("flow list failed: {e:#}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("flow list failed: {e:#}"))])
             }
         }
     }
@@ -2692,14 +2692,14 @@ impl PhoneHandler {
         Parameters(FlowInfoParams { id }): Parameters<FlowInfoParams>,
     ) -> CallToolResult {
         if !crate::registry::valid_flow_id(&id) {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "{id:?} is not a registry id; expected <app>/<flow> lowercase slugs"
             ))]);
         }
         match crate::registry::info(&id) {
-            Ok(detail) => CallToolResult::success(vec![Content::text(detail.to_string())]),
+            Ok(detail) => CallToolResult::success(vec![ContentBlock::text(detail.to_string())]),
             Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("flow info failed: {e:#}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("flow info failed: {e:#}"))])
             }
         }
     }
@@ -2732,29 +2732,29 @@ impl PhoneHandler {
         self.progress_reset();
         let is_file = id.ends_with(".json");
         if !is_file && !crate::registry::valid_flow_id(&id) {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "{id:?} is neither a registry id (<app>/<flow> lowercase slugs) nor a .json flow file"
             ))]);
         }
         let path = match crate::registry::resolve_target(&id) {
             Ok(path) => path,
-            Err(e) => return CallToolResult::error(vec![Content::text(format!("{e:#}"))]),
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
         };
         let flow = match crate::flow::load_flow(&path) {
             Ok(flow) => flow,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "flow {id} failed validation: {e:#}"
                 ))])
             }
         };
         if let Err(e) = crate::flow::check_input_map(&inputs, &flow.inputs) {
-            return CallToolResult::error(vec![Content::text(format!("{e:#}"))]);
+            return CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]);
         }
         let (compat, _installed) = match crate::flow::compat_gate(&flow, &self.daemon, force).await
         {
             Ok(gate) => gate,
-            Err(e) => return CallToolResult::error(vec![Content::text(format!("{e:#}"))]),
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
         };
         // One shared execution path with the CLI: the daemon's failure body is
         // kept whole and diagnosed, never reverse-parsed out of an error
@@ -2767,7 +2767,7 @@ impl PhoneHandler {
             // Nothing came back at all — a transport failure, or the flow was
             // refused before dispatch. There is no result to diagnose.
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "flow {id} did not run: {e:#}. Nothing was recorded; check phone_status \
                      and do NOT replay blindly."
                 ))])
@@ -2880,10 +2880,10 @@ impl PhoneHandler {
         };
         match crate::jev::run(&self.daemon, options).await {
             Ok(report) if report["ok"] == true => {
-                CallToolResult::success(vec![Content::text(report.to_string())])
+                CallToolResult::success(vec![ContentBlock::text(report.to_string())])
             }
-            Ok(report) => CallToolResult::error(vec![Content::text(report.to_string())]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("jev did not run: {e:#}"))]),
+            Ok(report) => CallToolResult::error(vec![ContentBlock::text(report.to_string())]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("jev did not run: {e:#}"))]),
         }
     }
 
@@ -2908,18 +2908,18 @@ impl PhoneHandler {
         let response = match self.daemon.flow_draft().await {
             Ok(response) => response,
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "flow draft failed: {e:#}"
                 ))])
             }
         };
         let Some(mut draft) = response.json.clone().filter(|_| response.status.is_success()) else {
-            return CallToolResult::error(vec![Content::text(response.body().to_string())]);
+            return CallToolResult::error(vec![ContentBlock::text(response.body().to_string())]);
         };
         if let Some(path) = save_as {
             // Read-only means nothing is written, a local file included.
             if *self.profile == ToolProfile::ReadOnly {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "save_as is not available with {TOOLS_ENV}=readonly; call phone_flow_draft without save_as to get the draft"
                 ))]);
             }
@@ -2929,13 +2929,13 @@ impl PhoneHandler {
                     draft["validation"] = validation;
                 }
                 Err(e) => {
-                    return CallToolResult::error(vec![Content::text(format!(
+                    return CallToolResult::error(vec![ContentBlock::text(format!(
                         "could not save the draft to {path}: {e:#}"
                     ))])
                 }
             }
         }
-        CallToolResult::success(vec![Content::text(draft.to_string())])
+        CallToolResult::success(vec![ContentBlock::text(draft.to_string())])
     }
 
     #[tool(
@@ -2964,13 +2964,13 @@ impl PhoneHandler {
         }): Parameters<FlowPublishParams>,
     ) -> CallToolResult {
         if !confirm {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "phone_flow_publish opens a public pull request; ask the user, then call again with confirm=true",
             )]);
         }
         let path = match crate::contrib::publish_source(&source) {
             Ok(path) => path,
-            Err(e) => return CallToolResult::error(vec![Content::text(format!("{e:#}"))]),
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(format!("{e:#}"))]),
         };
         let options = crate::contrib::PublishOptions {
             id,
@@ -2980,14 +2980,14 @@ impl PhoneHandler {
             draft: false,
         };
         match tokio::task::spawn_blocking(move || crate::contrib::publish(&path, &options)).await {
-            Ok(Ok(report)) => CallToolResult::success(vec![Content::text(
+            Ok(Ok(report)) => CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string(&report).unwrap_or_default(),
             )]),
             Ok(Err(e)) => {
-                CallToolResult::error(vec![Content::text(format!("publish failed: {e:#}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("publish failed: {e:#}"))])
             }
             Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("publish task failed: {e}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("publish task failed: {e}"))])
             }
         }
     }
@@ -3011,12 +3011,12 @@ impl PhoneHandler {
         Parameters(FlowReportParams { id, note, confirm }): Parameters<FlowReportParams>,
     ) -> CallToolResult {
         if !confirm {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "phone_flow_report opens a public issue; ask the user, then call again with confirm=true",
             )]);
         }
         if !crate::registry::valid_flow_id(&id) {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "{id:?} is not a registry id"
             ))]);
         }
@@ -3027,7 +3027,7 @@ impl PhoneHandler {
                     ..Default::default()
                 });
         if context.result.is_none() && note.as_deref().is_none_or(|n| n.trim().is_empty()) {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "no captured failure for this flow in this session — run it first, or pass a note describing what went wrong",
             )]);
         }
@@ -3048,14 +3048,14 @@ impl PhoneHandler {
             }
         }
         match tokio::task::spawn_blocking(move || crate::contrib::report(&context)).await {
-            Ok(Ok(outcome)) => CallToolResult::success(vec![Content::text(
+            Ok(Ok(outcome)) => CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string(&outcome).unwrap_or_default(),
             )]),
             Ok(Err(e)) => {
-                CallToolResult::error(vec![Content::text(format!("report failed: {e:#}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("report failed: {e:#}"))])
             }
             Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("report task failed: {e}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("report task failed: {e}"))])
             }
         }
     }
@@ -3075,11 +3075,11 @@ impl PhoneHandler {
     )]
     async fn phone_flow_update(&self) -> CallToolResult {
         match crate::registry::update().await {
-            Ok(report) => CallToolResult::success(vec![Content::text(
+            Ok(report) => CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string(&report).unwrap_or_default(),
             )]),
             Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("flow update failed: {e:#}"))])
+                CallToolResult::error(vec![ContentBlock::text(format!("flow update failed: {e:#}"))])
             }
         }
     }
@@ -3111,7 +3111,7 @@ impl PhoneHandler {
             limit: params.limit,
         };
         let response = match crate::device::logs_call(params.action.as_deref(), filter) {
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
             Ok(crate::device::LogsCall::Read(path)) => {
                 match self.daemon.request_json(reqwest::Method::GET, &path, None).await {
                     Ok(response) => return list_result(&response, crate::device::logs),
@@ -3126,7 +3126,7 @@ impl PhoneHandler {
         };
         match response {
             Ok(response) => rendered_result(&response, crate::device::logs_control),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("logs failed: {e:#}"))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("logs failed: {e:#}"))]),
         }
     }
 
@@ -3142,7 +3142,7 @@ impl PhoneHandler {
     ) -> CallToolResult {
         let path = match crate::device::crashes_path(name.as_deref(), process.as_deref(), limit) {
             Ok(path) => path,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         let render = if name.is_some() {
             crate::device::crash_report
@@ -3151,7 +3151,7 @@ impl PhoneHandler {
         };
         match self.daemon.request_json(reqwest::Method::GET, &path, None).await {
             Ok(response) => list_result(&response, render),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("crashes failed: {e:#}"))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("crashes failed: {e:#}"))]),
         }
     }
 
@@ -3175,7 +3175,7 @@ impl PhoneHandler {
     ) -> CallToolResult {
         let body = match crate::device::location_body(lat, lon, clear.unwrap_or(false)) {
             Ok(body) => body,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         match self
             .daemon
@@ -3185,7 +3185,7 @@ impl PhoneHandler {
             Ok(response) => {
                 rendered_result(&response, |json| crate::device::location(json, &body))
             }
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "set location failed: {e:#}; whether the phone took it is unknown"
             ))]),
         }
@@ -3212,7 +3212,7 @@ impl PhoneHandler {
     ) -> CallToolResult {
         let body = match crate::device::record_body(&action) {
             Ok(body) => body,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         let response = match &body {
             Some(body) => {
@@ -3228,7 +3228,7 @@ impl PhoneHandler {
         };
         match response {
             Ok(response) => rendered_result(&response, crate::device::recording),
-            Err(e) => CallToolResult::error(vec![Content::text(format!("record failed: {e:#}"))]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("record failed: {e:#}"))]),
         }
     }
 
@@ -3255,11 +3255,11 @@ impl PhoneHandler {
             fresh.unwrap_or(false),
         ) {
             Ok(body) => body,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         match self.daemon.install(&body).await {
             Ok(response) => rendered_result(&response, crate::device::installed),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "install failed: {e:#}. Whether the app got installed is unknown: check with \
                  phone_apps (source=installed) before trying again."
             ))]),
@@ -3286,18 +3286,18 @@ impl PhoneHandler {
     ) -> CallToolResult {
         let path = match crate::device::app_notes_path(&bundle) {
             Ok(path) => path,
-            Err(error) => return CallToolResult::error(vec![Content::text(error)]),
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
         let Some(text) = text else {
             return match self.daemon.request_json(reqwest::Method::GET, &path, None).await {
                 Ok(response) => list_result(&response, crate::device::app_notes),
                 Err(e) => {
-                    CallToolResult::error(vec![Content::text(format!("app notes failed: {e:#}"))])
+                    CallToolResult::error(vec![ContentBlock::text(format!("app notes failed: {e:#}"))])
                 }
             };
         };
         if text.len() > crate::device::NOTES_MAX_BYTES {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "notes are {} bytes; the limit is {} — shorten them. Nothing was saved.",
                 text.len(),
                 crate::device::NOTES_MAX_BYTES
@@ -3309,7 +3309,7 @@ impl PhoneHandler {
             Ok(response) => rendered_result(&response, |json| {
                 (json["ok"] == true).then(|| format!("saved {bytes} bytes of notes for {bundle}"))
             }),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "saving app notes failed: {e:#}"
             ))]),
         }
@@ -3718,7 +3718,7 @@ impl ToolProfile {
                 names.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
             ),
         };
-        Some(CallToolResult::error(vec![Content::text(format!(
+        Some(CallToolResult::error(vec![ContentBlock::text(format!(
             "{name} is not available in this session: {why}. Nothing was sent to the phone. \
              The operator can change {TOOLS_ENV} in the MCP server's environment (all, core, \
              readonly, or a comma list of tool names)."
@@ -3862,10 +3862,15 @@ fn keep_codex_images(mut result: CallToolResult, codex_client: bool) -> CallTool
         })
         .collect::<Vec<_>>();
     if !verdict.is_empty() {
-        result.content.push(Content::text(verdict.join(" ")));
+        result.content.push(ContentBlock::text(verdict.join(" ")));
     }
     result
 }
+
+/// The newest MCP revision served. 2026-07-28 drops `initialize` and the
+/// session with it; the per-session phone owner (`http.rs`) and the client
+/// name the Codex image handling reads both come from that handshake.
+const MAX_PROTOCOL: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
 #[tool_handler]
 impl ServerHandler for PhoneHandler {
@@ -3873,7 +3878,7 @@ impl ServerHandler for PhoneHandler {
         &self,
         mut request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
         let instance = request.arguments.as_mut().and_then(|args| args.remove("instance"));
         let instance = match instance {
             Some(serde_json::Value::String(name)) if crate::instances::valid_name(&name) => Some(name),
@@ -3885,7 +3890,7 @@ impl ServerHandler for PhoneHandler {
             return Err(rmcp::ErrorData::invalid_params("phone_instances lists all installed instances and takes no instance argument", None));
         }
         if let Some(refusal) = self.profile.refusal(&name) {
-            return Ok(refusal);
+            return Ok(refusal.into());
         }
         let codex_client = context
             .peer
@@ -3904,17 +3909,22 @@ impl ServerHandler for PhoneHandler {
                 Err(stopped) => {
                     let mut result = finish_result(&name, stopped, StructuredMode::from_env());
                     if let Some(instance) = &instance {
-                        result.content.insert(0, Content::text(format!("instance: {instance}")));
+                        result.content.insert(0, ContentBlock::text(format!("instance: {instance}")));
                     }
-                    return Ok(result);
+                    return Ok(result.into());
                 }
             }
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(handler, request, context);
-        let mut result = Self::tool_router().call(tcc).await?;
+        // No tool here asks the client for input or starts a task; anything
+        // but a finished result goes back as the router produced it.
+        let mut result = match Self::tool_router().call(tcc).await? {
+            rmcp::model::CallToolResponse::Complete(result) => result,
+            other => return Ok(other),
+        };
         // Last, so a result whose text is the JSON body still starts with it.
         if let Some(note) = reconnected {
-            result.content.push(Content::text(note));
+            result.content.push(ContentBlock::text(note));
         }
         if name == "phone_release_owner" || refused_as_released(&result) {
             // The task ended, or the phone was released under this session
@@ -3926,7 +3936,7 @@ impl ServerHandler for PhoneHandler {
         {
             handler.note_usable(true);
         }
-        result.meta.get_or_insert_with(rmcp::model::Meta::new).0
+        result.meta.get_or_insert_with(rmcp::model::MetaObject::new).0
             .insert("iphone-use/instance".into(), serde_json::json!(instance));
         if let Some(instance) = &instance {
             if name == "phone_status" || name == "phone_screen" {
@@ -3939,9 +3949,9 @@ impl ServerHandler for PhoneHandler {
             codex_client,
         );
         if let Some(instance) = &instance {
-            result.content.insert(0, Content::text(format!("instance: {instance}")));
+            result.content.insert(0, ContentBlock::text(format!("instance: {instance}")));
         }
-        Ok(result)
+        Ok(result.into())
     }
 
     async fn list_tools(
@@ -3949,11 +3959,9 @@ impl ServerHandler for PhoneHandler {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
-        Ok(rmcp::model::ListToolsResult {
-            tools: listed_tools(&self.profile),
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(rmcp::model::ListToolsResult::with_all_items(listed_tools(
+            &self.profile,
+        )))
     }
 
     async fn list_resources(
@@ -3970,9 +3978,9 @@ impl ServerHandler for PhoneHandler {
         &self,
         request: rmcp::model::ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
+    ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
         match crate::screen::read(&request.uri) {
-            Some(contents) => Ok(rmcp::model::ReadResourceResult::new(vec![contents])),
+            Some(contents) => Ok(rmcp::model::ReadResourceResult::new(vec![contents]).into()),
             None => Err(rmcp::ErrorData::resource_not_found(
                 format!("unknown resource {}", request.uri),
                 None,
@@ -3980,14 +3988,18 @@ impl ServerHandler for PhoneHandler {
         }
     }
 
-    fn get_info(&self) -> rmcp::model::ServerInfo {
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(ProtocolVersion::known_up_to(&MAX_PROTOCOL))
+    }
+
+    fn get_info(&self) -> rmcp::model::ServerConfig {
         InitializeResult::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .build(),
         )
-            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_protocol_version(MAX_PROTOCOL)
             .with_server_info(Implementation::new(
                 "iphone-use-mcp",
                 env!("CARGO_PKG_VERSION"),
@@ -4667,7 +4679,7 @@ fn with_structure(
             || json.get("steps").and_then(serde_json::Value::as_array).is_some_and(|steps|
                 steps.iter().any(|step| step.pointer("/system_capture/requested").and_then(serde_json::Value::as_bool) == Some(true)));
         if capture_requested {
-            result.content.insert(0, Content::text("System screenshot requested; saving to Photos is not independently verified. If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; do not take another screenshot to finish the pending save."));
+            result.content.insert(0, ContentBlock::text("System screenshot requested; saving to Photos is not independently verified. If a full-screen preview is open, inspect it and save that existing image with Done/Save to Photos. Check Photos or its picker; do not take another screenshot to finish the pending save."));
         }
         result.structured_content = Some(json);
     }
@@ -4680,9 +4692,9 @@ fn with_structure(
 fn flow_run_result(summary: serde_json::Value, is_error: bool) -> CallToolResult {
     let text = crate::compact::flow_run(&summary).unwrap_or_else(|| summary.to_string());
     let mut result = if is_error {
-        CallToolResult::error(vec![Content::text(text)])
+        CallToolResult::error(vec![ContentBlock::text(text)])
     } else {
-        CallToolResult::success(vec![Content::text(text)])
+        CallToolResult::success(vec![ContentBlock::text(text)])
     };
     result.structured_content = Some(summary);
     result
@@ -4692,7 +4704,7 @@ fn flow_run_result(summary: serde_json::Value, is_error: bool) -> CallToolResult
 /// on. Never says "not sent": that is a claim about the phone we cannot make
 /// once the request left this process.
 fn unknown_action_result(reason: &str, detail: String) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![Content::text(format!(
+    let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
         "outcome unknown: {detail} Do NOT resend automatically — check phone_elements or \
          phone_screenshot to see whether it took effect."
     ))]);
@@ -4709,7 +4721,7 @@ fn unknown_action_result(reason: &str, detail: String) -> CallToolResult {
 /// A mutation this process refused before anything left it. Here — and only
 /// here — re-sending is known to be safe, because nothing was sent.
 fn not_sent_result(reason: &str, detail: String) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![Content::text(detail)]);
+    let mut result = CallToolResult::error(vec![ContentBlock::text(detail)]);
     result.structured_content = Some(serde_json::json!({
         "ok": false,
         "error": reason,
@@ -4746,7 +4758,7 @@ fn daemon_action_result(
         } else {
             plain_success.to_string()
         };
-        return with_structure(CallToolResult::success(vec![Content::text(text)]), response);
+        return with_structure(CallToolResult::success(vec![ContentBlock::text(text)]), response);
     }
     // A refusal the daemon spelled out keeps its own fields — it knows what
     // happened and said so. "Spelled out" means a body that explicitly says
@@ -4757,7 +4769,7 @@ fn daemon_action_result(
     // Shared with the batch entry point so both agree on what counts.
     if response.explicit_refusal() {
         return with_structure(
-            CallToolResult::error(vec![Content::text(response.failure_summary())]),
+            CallToolResult::error(vec![ContentBlock::text(response.failure_summary())]),
             response,
         );
     }
@@ -4793,7 +4805,7 @@ fn daemon_action_result(
 fn daemon_read_result(response: &crate::client::DaemonResponse) -> CallToolResult {
     if !response.ok() {
         return with_structure(
-            CallToolResult::error(vec![Content::text(response.failure_summary())]),
+            CallToolResult::error(vec![ContentBlock::text(response.failure_summary())]),
             response,
         );
     }
@@ -4801,14 +4813,14 @@ fn daemon_read_result(response: &crate::client::DaemonResponse) -> CallToolResul
     // or a scalar is not this endpoint's shape, and attaching it would emit
     // something the protocol does not allow.
     if !response.json.as_ref().is_some_and(serde_json::Value::is_object) {
-        return CallToolResult::error(vec![Content::text(format!(
+        return CallToolResult::error(vec![ContentBlock::text(format!(
             "the daemon answered {} but the body was not a JSON object: {}",
             response.status,
             response.preview()
         ))]);
     }
     with_structure(
-        CallToolResult::success(vec![Content::text(response.preview())]),
+        CallToolResult::success(vec![ContentBlock::text(response.preview())]),
         response,
     )
 }
@@ -4833,9 +4845,9 @@ fn list_result(
                     == Some("app_changed") =>
         {
             let result = if response.ok() {
-                CallToolResult::success(vec![Content::text(text)])
+                CallToolResult::success(vec![ContentBlock::text(text)])
             } else {
-                CallToolResult::error(vec![Content::text(text)])
+                CallToolResult::error(vec![ContentBlock::text(text)])
             };
             with_structure(result, response)
         }
@@ -4852,7 +4864,7 @@ fn rendered_result(
 ) -> CallToolResult {
     if response.confirms_action() {
         if let Some(text) = response.json.as_ref().and_then(render) {
-            return with_structure(CallToolResult::success(vec![Content::text(text)]), response);
+            return with_structure(CallToolResult::success(vec![ContentBlock::text(text)]), response);
         }
     }
     daemon_read_result(response)
@@ -5007,8 +5019,8 @@ mod tests {
 
     fn image_verdict_result() -> CallToolResult {
         let mut result = CallToolResult::error(vec![
-            Content::text("Screenshot after failure · retry_safe:true"),
-            Content::image("cG5n", "image/png"),
+            ContentBlock::text("Screenshot after failure · retry_safe:true"),
+            ContentBlock::image("cG5n", "image/png"),
         ]);
         result.structured_content = Some(serde_json::json!({
             "ok": false, "error": "x", "outcome": "not_sent",
@@ -5026,7 +5038,7 @@ mod tests {
         );
         let mut expected = shaped.clone();
         expected.structured_content = None;
-        expected.content.push(Content::text(
+        expected.content.push(ContentBlock::text(
             "ok:false error:\"x\" outcome:\"not_sent\" retry_safe:true hint:\"try again\"",
         ));
         let adapted = keep_codex_images(shaped, is_codex_client("codex-mcp-client"));
@@ -5084,14 +5096,14 @@ mod tests {
     fn codex_image_device_text_does_not_suppress_verdict() {
         for mode in [StructuredMode::Slim, StructuredMode::Full] {
             let mut result = CallToolResult::success(vec![
-                Content::text("#0 [StaticText] \"Status ok:true now\""),
-                Content::image("cG5n", "image/png"),
+                ContentBlock::text("#0 [StaticText] \"Status ok:true now\""),
+                ContentBlock::image("cG5n", "image/png"),
             ]);
             result.structured_content = Some(serde_json::json!({"ok": true}));
             let shaped = finish_result("phone_screenshot", result, mode);
             let mut expected = shaped.clone();
             expected.structured_content = None;
-            expected.content.push(Content::text("ok:true"));
+            expected.content.push(ContentBlock::text("ok:true"));
             let adapted = keep_codex_images(shaped, true);
             assert_eq!(
                 serde_json::to_vec(&adapted).unwrap(),
@@ -6666,9 +6678,9 @@ mod tests {
         assert!(!reconnect_on_use("phone_flow_run", args(serde_json::json!({"id": "Not A Flow"})).as_ref()));
         assert!(reconnect_on_use("phone_elements", None));
         assert!(!may_reconnect_for_use(&status(serde_json::json!({"screen_private_secs": 30})), "me"));
-        let refused = CallToolResult::error(vec![Content::text(r#"{"ok":false,"error":"released","reconnecting":false}"#)]);
+        let refused = CallToolResult::error(vec![ContentBlock::text(r#"{"ok":false,"error":"released","reconnecting":false}"#)]);
         assert!(refused_as_released(&refused));
-        assert!(!refused_as_released(&CallToolResult::success(vec![Content::text(r#"{"released":true}"#)])));
+        assert!(!refused_as_released(&CallToolResult::success(vec![ContentBlock::text(r#"{"released":true}"#)])));
     }
 
     #[test]
@@ -6928,7 +6940,7 @@ mod tests {
 
     #[test]
     fn a_slim_structure_keeps_how_far_a_replacement_got() {
-        let mut result = CallToolResult::error(vec![Content::text("FAILED set_value")]);
+        let mut result = CallToolResult::error(vec![ContentBlock::text("FAILED set_value")]);
         result.structured_content = Some(serde_json::json!({
             "ok": false,
             "error": "outcome_unknown",
@@ -6945,7 +6957,7 @@ mod tests {
 
     #[test]
     fn a_slim_structure_keeps_the_verdict_and_the_summary_only() {
-        let mut result = CallToolResult::error(vec![Content::text("FAILED x · step 2 of 2")]);
+        let mut result = CallToolResult::error(vec![ContentBlock::text("FAILED x · step 2 of 2")]);
         result.structured_content = Some(serde_json::json!({
             "ok": false,
             "retry_safe": false,
@@ -6977,7 +6989,7 @@ mod tests {
 
     #[test]
     fn a_result_whose_text_is_the_body_keeps_its_structure() {
-        let mut result = CallToolResult::success(vec![Content::text(r#"{"ok":true,"a":{"b":1}}"#)]);
+        let mut result = CallToolResult::success(vec![ContentBlock::text(r#"{"ok":true,"a":{"b":1}}"#)]);
         result.structured_content = Some(serde_json::json!({"ok": true, "a": {"b": 1}}));
         let slim = shape_structured(result.clone(), StructuredMode::Slim);
         assert_eq!(slim.structured_content, result.structured_content);
