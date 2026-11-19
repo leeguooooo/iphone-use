@@ -119,6 +119,7 @@ impl TypeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HomeLayoutParams {
+    /// One zero-based home page to read; omit to read every page and folder.
     pub page: Option<usize>,
     /// Omit to read. `backup` saves the current layout on the Mac; `preview`
     /// shows what writing `file` would change, by app identifier; `apply`
