@@ -31,7 +31,7 @@ schemars = "1.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # `--listen` serves rmcp's streamable HTTP service; same axum as crates/server.
-axum = "0.7"
+axum = "0.8"
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }

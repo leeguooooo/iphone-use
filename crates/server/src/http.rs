@@ -1159,8 +1159,8 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/agent/flows", get(agent_flows))
         .route("/agent/flow/run", post(agent_flow_run))
         .route("/agent/task", post(agent_task_start))
-        .route("/agent/task/:id", get(agent_task_get))
-        .route("/agent/task/:id/:verb", post(agent_task_act))
+        .route("/agent/task/{id}", get(agent_task_get))
+        .route("/agent/task/{id}/{verb}", post(agent_task_act))
         .route("/agent/tasks", get(agent_tasks))
         .route("/agent/reference", get(agent_reference))
         // Shortcuts RPC return path: the phone POSTs structured results here.
@@ -1192,7 +1192,7 @@ fn api_routes() -> Router<Arc<AppState>> {
         // screen recording (`recording`) and per-app notes (`flows`).
         .route("/agent/logs", get(agent_logs_get).post(agent_logs_post))
         .route("/agent/crashes", get(agent_crashes))
-        .route("/agent/crashes/:name", get(agent_crash))
+        .route("/agent/crashes/{name}", get(agent_crash))
         .route("/agent/location", post(agent_location))
         .route("/agent/record", get(agent_record_get).post(agent_record_post))
         .route(
@@ -1207,11 +1207,11 @@ fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/agent/schedules/runs", get(crate::schedules::all_runs))
         .route(
-            "/agent/schedules/:id",
+            "/agent/schedules/{id}",
             axum::routing::delete(crate::schedules::remove).patch(crate::schedules::update),
         )
-        .route("/agent/schedules/:id/runs", get(crate::schedules::runs))
-        .route("/agent/schedules/:id/run", post(crate::schedules::run_now))
+        .route("/agent/schedules/{id}/runs", get(crate::schedules::runs))
+        .route("/agent/schedules/{id}/run", post(crate::schedules::run_now))
 }
 
 // ---------------------------------------------------------------------------
