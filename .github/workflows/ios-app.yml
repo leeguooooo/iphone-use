@@ -14,6 +14,9 @@ on:
       - 'apps/ios/**'
       - 'crates/browser-session/**'
       - 'scripts/build-browser-session.sh'
+      # remote-connection job below (moved here from pr-checks.yml)
+      - 'scripts/test-remote-connection.sh'
+      - 'scripts/remote-connection-check.swift'
       - '.github/workflows/ios-app.yml'
   workflow_dispatch:
 
@@ -27,6 +30,20 @@ permissions:
   contents: read
 
 jobs:
+  # Moved from pr-checks.yml: it only compiles apps/ios/IPhoneUseRemote/Sources
+  # plus scripts/remote-connection-check.swift (see
+  # scripts/test-remote-connection.sh), so it belongs behind this workflow's
+  # apps/ios paths filter instead of a macOS runner on every PR. It keeps its
+  # own macos-15 runner (not this file's macos-26 one), exactly as before.
+  remote-connection:
+    name: Remote connection and credential recovery
+    # The iOS app requires Swift 6 on a supported macOS runner image.
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash scripts/test-remote-connection.sh
+
   unit-tests:
     name: Remote app unit tests (simulator)
     # The app is written against the current Swift concurrency rules and does

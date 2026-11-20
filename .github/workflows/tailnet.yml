@@ -1,0 +1,44 @@
+name: Tailscale helper
+
+# The Go helper under tailnet/ (iphone-use-tailnet). It used to be a job in
+# pr-checks.yml, which spent a ~5-minute macOS runner on every PR although
+# only a handful of PRs touch tailnet/. Nothing else in the repository builds
+# from tailnet/ except release-binaries.yml, which re-runs the same vet/tests
+# and the universal build on every tag, so a release still cannot ship an
+# untested helper.
+on:
+  pull_request:
+    paths:
+      - 'tailnet/**'
+      - '.github/workflows/tailnet.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  tailnet-helper:
+    name: Tailscale helper (iphone-use-tailnet)
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tailnet/go.mod
+          # setup-go has no restore-only mode, and every PR branch saving its
+          # own module cache evicts the ones worth keeping. Only main saves.
+          cache: ${{ github.ref == 'refs/heads/main' }}
+          cache-dependency-path: tailnet/go.sum
+      - name: vet, unit and private-tailnet end-to-end tests, universal build
+        working-directory: tailnet
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./... && go vet -tags integration ./...
+          go test ./...
+          go test -tags integration -count=1 ./...
+          OUT="$RUNNER_TEMP/iphone-use-tailnet" bash build.sh
