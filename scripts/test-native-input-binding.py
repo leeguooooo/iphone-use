@@ -19,12 +19,30 @@ def block(source, marker):
     return source[start:end]
 
 
+def statement(source, marker):
+    """A declaration that ends where its parentheses balance, such as `static let x = T(...)`."""
+    start = source.index(marker)
+    end = source.index('(', start) + 1
+    depth = 1
+    while depth:
+        if source[end] == '(': depth += 1
+        elif source[end] == ')': depth -= 1
+        end += 1
+    return source[start:end]
+
+
 routes = (SOURCE / 'RunnerRoutes.swift').read_text()
 methods = '\n'.join(block(routes, '  private func ' + name + '(').replace('private func', 'func', 1)
                     for name in ['inputTarget', 'checkInputTarget', 'checkedInputTarget',
                                  'boundKeys', 'boundClearState', 'clearBoundInput',
                                  'selectedInputTarget', 'checkedReplacementTarget', 'focusReplacementTarget'])
-helpers = block((SOURCE / 'RunnerElements.swift').read_text(), 'enum InputTargetCheck') + '\n' + block((SOURCE / 'RunnerElements.swift').read_text(), 'enum ElementOwnership {')
+# boundKeys waits for the keyboard and reads the field around typing with these production members.
+methods += '\n' + statement(routes, '  static let keyboardNotReady = RunnerError(')
+methods += '\n' + block(routes, '  static func completeText(')
+elements_source = (SOURCE / 'RunnerElements.swift').read_text()
+helpers = '\n'.join(block(elements_source, marker) for marker in [
+    'enum InputTargetCheck', 'enum ElementOwnership {', 'struct KeyboardSettle {',
+    'enum TypedTextCheck {', 'enum ElementFrameStability {'])
 error = block((SOURCE / 'RunnerHTTP.swift').read_text(), 'struct RunnerError: Error')
 program = r'''
 import Foundation
@@ -106,6 +124,11 @@ final class RunnerTests {
   var lastMapKeys: Bool?
   var afterSend: (() -> Void)?
   var focusBlocked = false
+  // Synthetic keyboard verdict. KeyboardSettle's frame logic has its own Runner unit checks.
+  var keyboard = KeyboardSettle.Verdict.absent
+  var keyboardWaits = 0
+  // Characters the synthetic field drops, like keys sent while the keyboard is still arriving.
+  var droppedKeys = 0
   init() { root.nodes = [node] }
   func foregroundTree() throws -> UINode { root }
   func foreground() -> (pid:Int32, unused:Bool) { (foregroundPID,true) }
@@ -122,9 +145,13 @@ final class RunnerTests {
   func actionNode(_ id:String, editing:Bool) throws -> UINode { try freshNode(id) }
   func editableEvidence(_ node:UINode) -> Bool? { node.editableState }
   func fullElementValue(_ id:String, limit:Int) throws -> [String:Any] { fullValue }
+  func waitForKeyboard(timeout: TimeInterval = 2.5) -> KeyboardSettle.Verdict { keyboardWaits += 1; return keyboard }
   func typeIntoFocus(_ text:String, frequency:UInt, mapKeys:Bool = true, targetPID:Int32?) throws -> String {
     precondition(targetPID == 42); sends += 1; lastMapKeys = mapKeys
     if text.contains("delete") { fullValue = ["value":"", "complete":true] }
+    else if let value = fullValue["value"] as? String {
+      fullValue["value"] = value + String(text.dropFirst(min(droppedKeys, text.count)))
+    }
     afterSend?(); return "synthetic"
   }
 }
@@ -187,6 +214,28 @@ do {
   let r = RunnerTests();let t = try token(r)
   _ = try r.clearBoundInput(t)
   check(r.sends == 1,"clear dispatches once and verifies full empty value")
+}
+do {
+  let r = RunnerTests();let t = try token(r)
+  let response = try r.boundKeys("ab.c12x",token:t,frequency:60)
+  check(r.keyboardWaits == 1 && r.sends == 1,"bound text waits for the keyboard once, then types once")
+  check(response.headers["X-IPU-Keyboard"] == "absent","bound text reports the keyboard verdict")
+  check(r.fullValue["value"] as? String == "oldab.c12x","synthetic field received every key")
+}
+do {
+  let r = RunnerTests();let t = try token(r);r.keyboard = .wait
+  refused({_ = try r.boundKeys("ab.c12x",token:t,frequency:60)},status:400,"unsettled keyboard refuses before any key")
+  check(r.sends == 0,"keyboard_not_ready sends nothing")
+}
+do {
+  let r = RunnerTests();let t = try token(r);r.droppedKeys = 5
+  refused({_ = try r.boundKeys("ab.c12x",token:t,frequency:60)},status:500,"short plain-field text is an unknown outcome")
+  check(r.sends == 1,"text_short never retypes")
+}
+do {
+  let r = RunnerTests();let t = try token(r);r.droppedKeys = 5;r.fullValue = ["value":"old", "complete":false]
+  _ = try r.boundKeys("ab.c12x",token:t,frequency:60)
+  check(r.sends == 1,"an incomplete value read proves nothing and keeps the dispatch receipt")
 }
 for full in [[String:Any](),["value":"", "complete":false],["complete":true]] {
   let r = RunnerTests();let t = try token(r);r.fullValue = full
