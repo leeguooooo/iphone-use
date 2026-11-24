@@ -123,6 +123,53 @@ final class UINode {
   }
 }
 
+/// Whether the on-screen keyboard has finished arriving, judged from its frame sampled over time.
+/// Keys sent while it is still coming up can reach the field as key presses that insert nothing:
+/// simulator, iOS 27.2, a loaded host — a web password field took "ab" of "ab.c12x", the page saw
+/// keydown events for the rest and no input, and the write still reported success. Settled means
+/// the same frame for `stableFor`; absent means no keyboard showed up within `absentAfter` (a
+/// hardware keyboard, or a field that takes none), and the caller types as before.
+struct KeyboardSettle {
+  enum Verdict: String { case wait, settled, absent }
+
+  /// The frame a keyboard reports can be its final one while it is still sliding in, so a frame
+  /// seen once proves nothing: it must hold for `stableFor`, on every call.
+  var stableFor: TimeInterval = 0.3
+  var absentAfter: TimeInterval = 0.6
+  private var since: (frame: CGRect, at: TimeInterval)?
+  private var sawKeyboard = false
+
+  init(stableFor: TimeInterval = 0.3, absentAfter: TimeInterval = 0.6) {
+    self.stableFor = stableFor
+    self.absentAfter = absentAfter
+  }
+
+  mutating func observe(_ frame: CGRect?, elapsed: TimeInterval) -> Verdict {
+    guard let frame, frame.width > 0, frame.height > 0 else {
+      since = nil
+      return !sawKeyboard && elapsed >= absentAfter ? .absent : .wait
+    }
+    sawKeyboard = true
+    guard let since, ElementFrameStability.close(since.frame, frame) else {
+      self.since = (frame, elapsed)
+      return .wait
+    }
+    return elapsed - since.at >= stableFor ? .settled : .wait
+  }
+}
+
+/// Whether typed text reached a plain field, from its complete value before and after: the field
+/// holds the typed text, or grew by at least as many characters (autocorrect may rewrite a word
+/// but keeps its length). A field that grew by less lost keys — the leading-characters drop seen
+/// on a simulator while the keyboard was still arriving.
+enum TypedTextCheck {
+  static func landed(typed: String, before: String, after: String) -> Bool {
+    if typed.isEmpty { return true }
+    if after.contains(typed) && after.count >= before.count + typed.count { return true }
+    return after.count - before.count >= typed.count
+  }
+}
+
 /// Read-only polling of a retained element, never a screen snapshot or an input retry.
 /// A sample budget bounds AX calls; a slow synchronous AX call cannot be interrupted.
 enum ElementFrameStability {

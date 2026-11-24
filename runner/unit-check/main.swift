@@ -1170,5 +1170,35 @@ do {
   check(InputTargetCheck.focusPointOccluded(target:childAction.children[0],root:childAction,point:point), "an actionable descendant cannot be blindly tapped as the field")
 }
 
+do {
+  // Keys wait for an arriving keyboard: the same frame for 0.3 s, never a single sighting.
+  let docked = CGRect(x: 0, y: 560, width: 390, height: 284)
+  var settle = KeyboardSettle()
+  check(settle.observe(nil, elapsed: 0) == .wait, "no keyboard yet: wait for one that may be coming")
+  check(settle.observe(CGRect(x: 0, y: 760, width: 390, height: 284), elapsed: 0.1) == .wait, "keyboard sliding in")
+  check(settle.observe(docked, elapsed: 0.2) == .wait, "first sighting of the final frame is not enough")
+  check(settle.observe(docked, elapsed: 0.4) == .wait, "held 0.2 s: not yet")
+  check(settle.observe(docked, elapsed: 0.55) == .settled, "held 0.35 s: settled")
+  var moved = KeyboardSettle()
+  _ = moved.observe(docked, elapsed: 0)
+  check(moved.observe(docked.offsetBy(dx: 0, dy: -44), elapsed: 0.35) == .wait, "a frame that moved restarts the wait")
+  check(moved.observe(docked.offsetBy(dx: 0, dy: -44), elapsed: 0.7) == .settled, "and settles once it holds")
+  var none = KeyboardSettle()
+  check(none.observe(nil, elapsed: 0.3) == .wait, "still within the time a keyboard takes to appear")
+  check(none.observe(.zero, elapsed: 0.65) == .absent, "none came: a hardware keyboard, type as before")
+  var gone = KeyboardSettle()
+  _ = gone.observe(docked, elapsed: 0)
+  check(gone.observe(nil, elapsed: 1.0) == .wait, "a keyboard that vanished mid-wait is not 'absent'")
+}
+
+do {
+  check(TypedTextCheck.landed(typed: "hello", before: "", after: "hello"), "all typed text landed")
+  check(TypedTextCheck.landed(typed: " world", before: "hello", after: "hello world"), "appended to existing text")
+  check(TypedTextCheck.landed(typed: "teh ", before: "", after: "the "), "autocorrect keeps the length")
+  check(!TypedTextCheck.landed(typed: "ab.c12x", before: "", after: "ab"), "leading keys only: short")
+  check(!TypedTextCheck.landed(typed: "hello", before: "x", after: "x"), "nothing landed")
+  check(TypedTextCheck.landed(typed: "", before: "x", after: "x"), "nothing to type")
+}
+
 print(failures == 0 ? "unit check: \(checks) checks passed" : "unit check: \(failures) of \(checks) checks FAILED")
 exit(failures == 0 ? 0 : 1)

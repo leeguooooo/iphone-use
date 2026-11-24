@@ -740,6 +740,12 @@ is no longer cached). The action result and the observation are separate facts:
   iPhone 17 Pro Max, iOS 27.2, so `{label:"."}` found nothing), and the keyboard
   is blank in screenshots while a password field has focus. If a key must be
   tapped, tap its element by index from a fresh snapshot.
+- Typing waits for an arriving on-screen keyboard to settle before the first key
+  (keys sent while it slides in can reach the field and insert nothing). One that
+  never settles within 2.5 s answers `keyboard_not_ready` with nothing sent: send
+  it again. Text typed into a plain field is checked against the field afterwards;
+  a field that gained fewer characters than were typed fails as outcome unknown
+  (`text_short` in the runner error): read the field before typing again.
 - Web content and remote views (the system document picker, a web sign-in sheet)
   are served by a process other than the app. Element taps reach them. The
   document picker's search field takes keyboard focus in another process, so

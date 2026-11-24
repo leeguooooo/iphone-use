@@ -8649,6 +8649,11 @@ fn set_value_verification(detail: &mut Option<serde_json::Value>, verified: bool
 fn set_value_dispatch_error(error: anyhow::Error) -> SnapshotElementTapError {
     if runner_error_is_missing_element(&error) {
         SnapshotElementTapError::NotFound
+    } else if crate::runner::runner_http_error(&error)
+        .is_some_and(crate::runner::RunnerHttpError::nothing_sent)
+    {
+        // Refused before any key (keyboard_not_ready): safe to send again.
+        SnapshotElementTapError::BeforeDispatch(error)
     } else {
         SnapshotElementTapError::AfterDispatch(error)
     }
@@ -30986,6 +30991,34 @@ mod tests {
         assert!(input_target_refusal(&runner("input_target_tree_incomplete; nothing was sent")).is_none());
         assert!(input_target_refusal(&runner("input_target_ambiguous_or_missing")).is_none());
         assert!(input_target_refusal(&anyhow::anyhow!("connection reset")).is_none());
+    }
+
+    #[test]
+    fn a_keyboard_that_never_settled_is_a_not_sent_set_value() {
+        let runner = |status: reqwest::StatusCode, code: &str, message: &str| {
+            anyhow::Error::new(crate::runner::RunnerHttpError::from_body(
+                "POST /element/:id/value",
+                status,
+                &serde_json::json!({"value":{"error":code,"message":message}}).to_string(),
+            ))
+        };
+        assert!(matches!(
+            set_value_dispatch_error(runner(
+                reqwest::StatusCode::BAD_REQUEST,
+                "invalid element state",
+                "keyboard_not_ready: the keyboard was still coming up after 2.5 s; nothing was sent",
+            )),
+            SnapshotElementTapError::BeforeDispatch(_)
+        ));
+        // A short write after keys went out stays an unknown outcome.
+        assert!(matches!(
+            set_value_dispatch_error(runner(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "unknown error",
+                "text_short: typed 7 characters but the field gained 2; text outcome unknown; read the field before typing again",
+            )),
+            SnapshotElementTapError::AfterDispatch(_)
+        ));
     }
 
     #[test]

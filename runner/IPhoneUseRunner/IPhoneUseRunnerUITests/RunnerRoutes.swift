@@ -545,6 +545,11 @@ extension RunnerTests {
     if (text.contains("\n") || text.contains("\r")), node.type != "XCUIElementTypeTextView" {
       throw RunnerError.invalidArgument("newline_requires_multiline_field; nothing was sent")
     }
+    let keyboard = text.isEmpty ? KeyboardSettle.Verdict.absent : waitForKeyboard()
+    if keyboard == .wait {
+      throw Self.keyboardNotReady
+    }
+    let before = Self.completeText(try? fullElementValue(token, limit: 32768))
     let path = try typeIntoFocus(text, frequency: frequency, mapKeys: false, targetPID: node.pid)
     // This check follows dispatch: failure is uncertain, never a not-sent receipt.
     let after: UINode
@@ -554,7 +559,23 @@ extension RunnerTests {
       throw RunnerError.failed("input target changed during typing; text outcome unknown; do not retry input")
     }
     elements.renew(token, node: after)
-    return .value(NSNull(), headers: ["X-IPU-Gesture": path])
+    let now = Self.completeText(try? fullElementValue(token, limit: 32768))
+    if let before, let now, !TypedTextCheck.landed(typed: text, before: before, after: now) {
+      throw RunnerError.failed(
+        "text_short: typed \(text.count) characters but the field gained \(max(0, now.count - before.count)); text outcome unknown; read the field before typing again")
+    }
+    return .value(NSNull(), headers: ["X-IPU-Gesture": path, "X-IPU-Keyboard": keyboard.rawValue])
+  }
+
+  /// Refused before any key: the daemon reads "nothing was sent" as safe to retry.
+  static let keyboardNotReady = RunnerError(
+    status: 400, code: "invalid element state",
+    message: "keyboard_not_ready: the keyboard was still coming up after 2.5 s; nothing was sent")
+
+  /// A full value read's text when it is complete; nil when it cannot prove anything.
+  static func completeText(_ value: [String: Any]?) -> String? {
+    guard let value, value["complete"] as? Bool == true else { return nil }
+    return value["value"] as? String
   }
 
   // MARK: - Element reads
@@ -835,6 +856,10 @@ extension RunnerTests {
       throw RunnerError.invalidArgument("'value' or 'text' is required")
     }
     let (before, focused) = try focusForTyping(id)
+    let keyboard = text.isEmpty ? KeyboardSettle.Verdict.absent : waitForKeyboard()
+    if keyboard == .wait {
+      throw Self.keyboardNotReady
+    }
     let path = try typeIntoFocus(text, frequency: UInt((body["frequency"] as? NSNumber)?.intValue ?? 60))
     // An element that never reported focus (a web field) must show the text afterwards; otherwise
     // the keystrokes went to some other field and success would be a lie.
@@ -842,7 +867,42 @@ extension RunnerTests {
       throw RunnerError.failed(
         "typed into the focused field, but element \(id) did not report focus and its value did not change; the text may have gone to another field")
     }
-    return .value(NSNull(), headers: ["X-IPU-Gesture": path])
+    return .value(NSNull(), headers: ["X-IPU-Gesture": path, "X-IPU-Keyboard": keyboard.rawValue])
+  }
+
+  /// The keyboard frame as the trees show it (the app's, then SpringBoard's), else XCTest's query.
+  private func keyboardFrame() -> CGRect? {
+    if let root = try? foregroundTree() {
+      if let node = root.descendants().first(where: { $0.type == "XCUIElementTypeKeyboard" }) { return node.rect }
+      if let node = springBoardTreeIfRelevant(foregroundPID: root.pid)?
+        .descendants().first(where: { $0.type == "XCUIElementTypeKeyboard" }) {
+        return node.rect
+      }
+    }
+    let application = foreground().application
+    var frame: CGRect?
+    IPURBridge.performWithoutQuiescence(application) {
+      _ = IPURBridge.catchException {
+        let keyboard = application.keyboards.firstMatch
+        if keyboard.exists { frame = keyboard.frame }
+      }
+    }
+    return frame
+  }
+
+  /// Waits, before any key is sent, for an arriving keyboard to settle (see `KeyboardSettle`).
+  /// Returns `.wait` when it never did within `timeout`; nothing has been typed then.
+  func waitForKeyboard(timeout: TimeInterval = 2.5) -> KeyboardSettle.Verdict {
+    var settle = KeyboardSettle()
+    let start = Date()
+    while true {
+      let frame = keyboardFrame()
+      let elapsed = Date().timeIntervalSince(start)
+      let verdict = settle.observe(frame, elapsed: elapsed)
+      if verdict != .wait { return verdict }
+      if elapsed >= timeout { return .wait }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+    }
   }
 
   private func clearElement(_ id: String, _ request: HTTPRequest) throws -> HTTPResponse {
@@ -855,6 +915,8 @@ extension RunnerTests {
     }
     var node = try focusForTyping(id).node
     var remaining = Self.clearableCount(node)
+    // Deletes sent while the keyboard slides in are dropped like any other key.
+    if remaining > 0, waitForKeyboard() == .wait { throw Self.keyboardNotReady }
     for _ in 0..<3 where remaining > 0 {
       _ = try typeIntoFocus(String(repeating: XCUIKeyboardKey.delete.rawValue, count: min(remaining, 500)), frequency: 120)
       guard let fresh = try? freshNode(id) else { break }
@@ -1327,8 +1389,12 @@ extension RunnerTests {
       }
       return try boundKeys(text, token: token, frequency: frequency)
     }
+    let keyboard = text.isEmpty ? KeyboardSettle.Verdict.absent : waitForKeyboard()
+    if keyboard == .wait {
+      throw Self.keyboardNotReady
+    }
     let path = try typeIntoFocus(text, frequency: frequency)
-    return .value(NSNull(), headers: ["X-IPU-Gesture": path])
+    return .value(NSNull(), headers: ["X-IPU-Gesture": path, "X-IPU-Keyboard": keyboard.rawValue])
   }
 
   private func dismissKeyboard(_ request: HTTPRequest) throws -> HTTPResponse {
