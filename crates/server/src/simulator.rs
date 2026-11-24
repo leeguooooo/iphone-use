@@ -84,17 +84,37 @@ impl SimDevice {
 }
 
 /// `com.apple.CoreSimulator.SimRuntime.iOS-18-2` → (`iOS`, `18.2`).
+///
+/// A device-specific runtime, which Xcode installs for a device the general
+/// runtime does not support yet, carries the model after the version:
+/// `…SimRuntime.iOS-27-2-iPhone19-4` (the iPhone Duo, `iPhone19,4`) →
+/// (`iOS`, `27.2`).
 pub fn parse_runtime_key(key: &str) -> Option<(String, String)> {
     let tail = key.rsplit('.').next()?;
-    let (platform, version) = tail.split_once('-')?;
-    if platform.is_empty()
-        || !platform.chars().all(|c| c.is_ascii_alphanumeric())
-        || version.is_empty()
-        || !version.split('-').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
-    {
+    let (platform, rest) = tail.split_once('-')?;
+    if platform.is_empty() || !platform.chars().all(|c| c.is_ascii_alphanumeric()) {
         return None;
     }
-    Some((platform.to_string(), version.replace('-', ".")))
+    let digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
+    let parts: Vec<&str> = rest.split('-').collect();
+    let version_len = parts.iter().take_while(|part| digits(part)).count();
+    let suffix = &parts[version_len..];
+    let model_suffix = match suffix {
+        [] => true,
+        // `iPhone19-4`: letters and the model's major number, then its minor.
+        [model, minor] => {
+            let letters = model.trim_end_matches(|c: char| c.is_ascii_digit());
+            !letters.is_empty()
+                && letters.len() < model.len()
+                && letters.chars().all(|c| c.is_ascii_alphabetic())
+                && digits(minor)
+        }
+        _ => false,
+    };
+    if version_len == 0 || !model_suffix {
+        return None;
+    }
+    Some((platform.to_string(), parts[..version_len].join(".")))
 }
 
 /// `com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro` → `iPhone 16 Pro`.
@@ -1857,7 +1877,29 @@ pub mod tests {
             parse("com.apple.CoreSimulator.SimRuntime.iOS-26-0-1"),
             Some(("iOS".into(), "26.0.1".into()))
         );
-        for bad in ["", "iOS", "com.apple.CoreSimulator.SimRuntime.iOS-", "x.iOS-18-beta", "x.-18"] {
+        // A device-specific runtime (iPhone Duo, issue #447) keeps its version.
+        assert_eq!(
+            parse("com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4"),
+            Some(("iOS".into(), "27.2".into()))
+        );
+        assert_eq!(
+            parse("com.apple.CoreSimulator.SimRuntime.iOS-26-0-1-iPad17-2"),
+            Some(("iOS".into(), "26.0.1".into()))
+        );
+        for bad in [
+            "",
+            "iOS",
+            "com.apple.CoreSimulator.SimRuntime.iOS-",
+            "x.iOS-18-beta",
+            "x.-18",
+            "x.iOS-iPhone19-4",
+            "x.iOS-27-2-iPhone19",
+            "x.iOS-27-2-iPhone-4",
+            "x.iOS-27-2-19-iPhone",
+            "x.iOS-27-2-iPhone19-4-1",
+            "x.iOS-27-2-iPhone19-x",
+            "x.iOS-27-2-beta2-1x",
+        ] {
             assert_eq!(parse(bad), None, "{bad}");
         }
     }
@@ -1887,6 +1929,62 @@ pub mod tests {
         assert_eq!(first.to_status_json()["runtime"], "iOS 18.2");
         assert!(parse_devices("{}").is_err());
         assert!(parse_devices("not json").is_err());
+    }
+
+    #[test]
+    fn device_specific_runtimes_are_listed_and_found() {
+        // Xcode 27.2 with the iPhone Duo runtime next to the general one.
+        let json = r#"{
+  "devices" : {
+    "com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
+      { "udid" : "33333333-2222-4333-8444-555555555555", "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+        "state" : "Shutdown", "name" : "iPhone 17" }
+    ],
+    "com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4" : [
+      { "udid" : "74171023-2FC4-4120-B4FA-B7F68B7F7484", "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo",
+        "state" : "Shutdown", "name" : "iPhone Duo" }
+    ],
+    "com.apple.CoreSimulator.SimRuntime.iOS-27-2" : [
+      { "udid" : "FCBABC3E-B219-43F5-ACD6-4CDBD39DDD2D", "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+        "state" : "Booted", "name" : "iPhone 17" }
+    ]
+  }
+}"#;
+        let devices = parse_devices(json).unwrap();
+        let rows: Vec<(&str, &str, &str)> = devices
+            .iter()
+            .map(|d| (d.name.as_str(), d.runtime.as_str(), d.runtime_id.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "iPhone 17",
+                    "iOS 27.2",
+                    "com.apple.CoreSimulator.SimRuntime.iOS-27-2"
+                ),
+                (
+                    "iPhone Duo",
+                    "iOS 27.2",
+                    "com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4"
+                ),
+                (
+                    "iPhone 17",
+                    "iOS 26.0",
+                    "com.apple.CoreSimulator.SimRuntime.iOS-26-0"
+                ),
+            ]
+        );
+        let duo = find(&devices, "iphone duo").unwrap();
+        assert_eq!(duo.udid, "74171023-2FC4-4120-B4FA-B7F68B7F7484");
+        assert_eq!(duo.model.as_deref(), Some("iPhone Duo"));
+        let by_udid = find(&devices, "74171023-2fc4-4120-b4fa-b7f68b7f7484").unwrap();
+        assert_eq!(by_udid.name, "iPhone Duo");
+        // Two named iPhone 17: the booted one on the newest runtime wins.
+        assert_eq!(find(&devices, "iPhone 17").unwrap().os, "27.2");
     }
 
     #[test]
