@@ -13,6 +13,12 @@ on:
       - 'docs/**'
       - 'site/**'
       - '**/*.md'
+      # Nothing below builds or tests these: tailnet/** has its own workflow
+      # (tailnet.yml), and relay/ (the Cloudflare Worker) is not read by any
+      # step here — crates/server only names it in comments, while web/ IS
+      # compiled in via include_str! and so stays a trigger.
+      - 'tailnet/**'
+      - 'relay/**'
   workflow_dispatch:
 
 concurrency:
@@ -54,37 +60,6 @@ jobs:
       - run: python3 -I scripts/test-wait-simulator-verdict.py
       - run: python3 -I scripts/test-moving-target-verdict.py
       - run: python3 -I scripts/test-simulator-ui-readiness.py
-
-  tailnet-helper:
-    name: Tailscale helper (iphone-use-tailnet)
-    runs-on: macos-15
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: tailnet/go.mod
-          # setup-go has no restore-only mode, and every PR branch saving its
-          # own module cache evicts the ones worth keeping. Only main saves.
-          cache: ${{ github.ref == 'refs/heads/main' }}
-          cache-dependency-path: tailnet/go.sum
-      - name: vet, unit and private-tailnet end-to-end tests, universal build
-        working-directory: tailnet
-        run: |
-          test -z "$(gofmt -l .)"
-          go vet ./... && go vet -tags integration ./...
-          go test ./...
-          go test -tags integration -count=1 ./...
-          OUT="$RUNNER_TEMP/iphone-use-tailnet" bash build.sh
-
-  remote-connection:
-    name: Remote connection and credential recovery
-    # The iOS app requires Swift 6 on a supported macOS runner image.
-    runs-on: macos-15
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: bash scripts/test-remote-connection.sh
 
   test:
     name: Tests and MCP tool discovery
