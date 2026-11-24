@@ -735,6 +735,11 @@ is no longer cached). The action result and the observation are separate facts:
   (a web field shows eight dots for any length), so `ok:true` means "not empty":
   check the screen or the page's own feedback. `phone_login`
   (`POST /agent/login`) signs in from the password vault.
+  Do not tap a password out on the on-screen keyboard: keys can lack labels
+  (the period on the Japanese number layout read with an empty label on an
+  iPhone 17 Pro Max, iOS 27.2, so `{label:"."}` found nothing), and the keyboard
+  is blank in screenshots while a password field has focus. If a key must be
+  tapped, tap its element by index from a fresh snapshot.
 - Web content and remote views (the system document picker, a web sign-in sheet)
   are served by a process other than the app. Element taps reach them. The
   document picker's search field takes keyboard focus in another process, so
