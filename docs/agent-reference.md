@@ -979,7 +979,8 @@ always read `••••••••`.
 | `needs_code: {via}` | The app sent a code: call `phone_login` with `code_via` `sms`/`mail` and `code_from` (the sender) once it arrived (`POST /agent/login/code`). At most two code requests per login. An authenticator code from the entry is entered automatically. |
 | `ambiguous_vault_entry` + `candidates` | Ask the user which entry; pass its name as `item` (and `user` when names repeat). |
 | `no_vault_entry` | Ask the user which entry to use. Never guess. |
-| `vault_locked` | Ask the user to unlock the vault on the Mac (`bwu unlock`). |
+| `vault_locked` | The vault is locked: an unlock prompt was opened on the Mac and the login waited about 15 s for it. Ask the user to enter the master password there (or run `bwu unlock`), then call again. |
+| `vault_not_configured` | bitwarden-use has no account on this Mac: ask the user to run `bwu login`, or sign in by hand. Answered at once. |
 | `not_a_login_form` | More than one password field on the page (ones scrolled off screen count), or a field labelled as a new password: sign-up, a password change or a reset. Nothing was typed into a password field. Not done automatically. |
 | `value_not_applied` | The account field rejected the typed text (a composing keyboard): ask the user to switch the phone's keyboard to English. |
 | `value_landed_elsewhere` | Typing went into another field; that field was cleared at once. Finish this login by hand with the user. |

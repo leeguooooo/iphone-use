@@ -216,6 +216,57 @@ fn safe_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// How long a login waits for a person to unlock the vault before it answers
+/// `vault_locked` (`IPHONE_USE_VAULT_UNLOCK_WAIT_SECS`, for tests).
+fn unlock_wait() -> Duration {
+    let secs = std::env::var("IPHONE_USE_VAULT_UNLOCK_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(15)
+        .min(120);
+    Duration::from_secs(secs)
+}
+
+/// `bwu config show` output with an account in it.
+pub fn vault_configured(config: &[u8]) -> bool {
+    match serde_json::from_slice::<Value>(config) {
+        Ok(config) => config
+            .get("email")
+            .and_then(Value::as_str)
+            .is_some_and(|email| !email.trim().is_empty()),
+        // Unreadable: do not claim it is missing.
+        Err(_) => true,
+    }
+}
+
+/// The one `bwu unlock` prompt in flight: started at most once at a time and
+/// left running past the request that started it.
+static UNLOCK_PROMPT: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+fn start_unlock_prompt(bwu: &Path) {
+    let mut prompt = UNLOCK_PROMPT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(child) = prompt.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+    }
+    *prompt = std::process::Command::new(bwu)
+        .arg("unlock")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
+}
+
+#[doc(hidden)]
+pub fn stop_unlock_prompt_for_tests() {
+    if let Some(mut child) = UNLOCK_PROMPT.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 /// The password vault, through bitwarden-use.
 pub struct Vault {
     bwu: PathBuf,
@@ -236,24 +287,57 @@ impl Vault {
             })
     }
 
-    /// Unlock without a prompt when the keychain holds the master password;
-    /// bitwarden-use falls back to its own dialog on the Mac otherwise.
-    async fn ensure_unlocked(&self) -> Result<(), LoginError> {
-        let unlocked = |output: Option<std::process::Output>| {
-            output.is_some_and(|output| output.status.success())
-        };
-        if unlocked(run_tool(&self.bwu, &["unlocked"], Duration::from_secs(10)).await) {
+    /// Whether the vault can be used now, answered within about
+    /// [`unlock_wait`]: never for a vault that was never set up, and for a
+    /// locked one only as long as a person may be typing the master password
+    /// into the prompt on the Mac. `bwu unlock` used to be awaited for up to
+    /// 90 s with the runner held, so `POST /agent/login` sat without an answer
+    /// on a Mac nobody was at (robot, 2026-11-24).
+    pub async fn ensure_unlocked(&self) -> Result<(), LoginError> {
+        if self.unlocked().await {
             return Ok(());
         }
-        let _ = run_tool(&self.bwu, &["unlock"], Duration::from_secs(90)).await;
-        if unlocked(run_tool(&self.bwu, &["unlocked"], Duration::from_secs(10)).await) {
-            return Ok(());
+        if !self.configured().await {
+            return Err(LoginError::new(
+                503,
+                "vault_not_configured",
+                "no password vault is set up on the Mac (bitwarden-use has no account): ask the user to run `bwu login` there, or sign in by hand",
+            ));
+        }
+        // The prompt keeps running after this answer, so a person at the Mac
+        // can still unlock and the next call goes through.
+        start_unlock_prompt(&self.bwu);
+        let deadline = Instant::now() + unlock_wait();
+        while Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if self.unlocked().await {
+                return Ok(());
+            }
         }
         Err(LoginError::new(
             503,
             "vault_locked",
-            "the password vault on the Mac is locked: ask the user to unlock it (`bwu unlock`), then try again",
+            "the password vault on the Mac is locked and an unlock prompt is open there: ask the user to enter the master password in it (or run `bwu unlock`), then try again",
         ))
+    }
+
+    async fn unlocked(&self) -> bool {
+        run_tool(&self.bwu, &["unlocked"], Duration::from_secs(5))
+            .await
+            .is_some_and(|output| output.status.success())
+    }
+
+    /// False only when bitwarden-use says it has no account; an answer it
+    /// cannot give (an older bwu without `config show`) counts as set up.
+    async fn configured(&self) -> bool {
+        let Some(output) = run_tool(&self.bwu, &["config", "show"], Duration::from_secs(5)).await
+        else {
+            return true;
+        };
+        if !output.status.success() {
+            return true;
+        }
+        vault_configured(&output.stdout)
     }
 
     pub async fn entries(&self) -> Result<Vec<VaultEntry>, LoginError> {
