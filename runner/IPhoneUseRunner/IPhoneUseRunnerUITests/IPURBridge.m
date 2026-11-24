@@ -883,36 +883,58 @@ static NSDictionary *IPURRect(id snapshot)
   };
 }
 
-// A valid system frame is this device's screen and does not change: callers apply the
-// interface orientation from its short and long sides. So it is read once per runner launch
-// rather than once per request (a snapshot round trip before every touch). The UIKit fallback
-// is not kept, so a later call tries the system frame again.
-static CGSize IPURStableScreenSize;
-static BOOL IPURHasStableScreenSize = NO;
+// The screen is read from the system root and the active applications' roots (shallow snapshots)
+// and kept for a short while: every touch needs it, and a snapshot round trip before each one is
+// too slow. It is not kept for the runner's lifetime: a foldable (iPhone Duo, issue #447) changes
+// screens when it is opened or closed, and a size read on the other display refused every point
+// beyond it. The UIKit fallback is kept for one command request only, so a later call tries the
+// snapshots again.
+static CGSize IPURRecentScreenSize;
+static CFAbsoluteTime IPURRecentScreenSizeAt = 0;
+static const CFTimeInterval IPURScreenSizeTTL = 1.0;
 
-+ (CGSize)screenSizePoints
+static CGSize IPURSnapshotFrameSize(id snapshot)
 {
-  @synchronized (self) {
-    if (IPURHasStableScreenSize) return IPURStableScreenSize;
-  }
-  if (IPURUseRequestCache() && IPURCachedScreenSize != nil) return IPURCachedScreenSize.CGSizeValue;
-  // Read the system root only: no foreground resolution (which itself needs screenCenter),
-  // children, or application content. UIKit's nativeBounds can be compatibility-sized too.
-  id system = [self systemApplicationElement];
-  id snapshot = system == nil ? nil : [self requestSnapshotForElement:system
-                                                            maxDepth:1 maxNodes:1 error:NULL];
   CGRect frame = CGRectZero;
   id value = IPURKVC(snapshot, @"frame");
   if ([value isKindOfClass:NSValue.class] && strcmp([(NSValue *)value objCType], @encode(CGRect)) == 0) {
     [(NSValue *)value getValue:&frame];
   }
-  CGSize systemSize = IPURScreenSizeFromFrame(frame, CGSizeZero);
-  if (systemSize.width > 0) {
-    @synchronized (self) {
-      IPURStableScreenSize = systemSize;
-      IPURHasStableScreenSize = YES;
+  return IPURScreenSizeFromFrame(frame, CGSizeZero);
+}
+
++ (CGSize)screenSizePoints
+{
+  @synchronized (self) {
+    if (IPURRecentScreenSizeAt > 0
+        && CFAbsoluteTimeGetCurrent() - IPURRecentScreenSizeAt < IPURScreenSizeTTL) {
+      return IPURRecentScreenSize;
     }
-    return systemSize;
+  }
+  if (IPURUseRequestCache() && IPURCachedScreenSize != nil) return IPURCachedScreenSize.CGSizeValue;
+  // Read roots only: no foreground resolution (which itself needs screenCenter), children, or
+  // application content. UIKit's nativeBounds can be compatibility-sized too.
+  NSMutableArray *elements = [NSMutableArray array];
+  id system = [self systemApplicationElement];
+  if (system != nil) [elements addObject:system];
+  for (id element in [self activeApplicationElements]) {
+    if (element != system) [elements addObject:element];
+  }
+  CGRect frames[8];
+  size_t count = 0;
+  for (id element in elements) {
+    if (count == sizeof(frames) / sizeof(frames[0])) break;
+    id snapshot = [self requestSnapshotForElement:element maxDepth:1 maxNodes:1 error:NULL];
+    CGSize size = IPURSnapshotFrameSize(snapshot);
+    if (size.width > 0) frames[count++] = CGRectMake(0, 0, size.width, size.height);
+  }
+  CGSize screenSize = IPURScreenSizeFromFrames(frames, count, CGSizeZero);
+  if (screenSize.width > 0) {
+    @synchronized (self) {
+      IPURRecentScreenSize = screenSize;
+      IPURRecentScreenSizeAt = CFAbsoluteTimeGetCurrent();
+    }
+    return screenSize;
   }
   CGSize size = UIScreen.mainScreen.bounds.size;
   if (IPURUseRequestCache()) IPURCachedScreenSize = [NSValue valueWithCGSize:size];

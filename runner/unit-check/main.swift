@@ -573,6 +573,43 @@ do {
   }
 }
 
+// MARK: - Foldable screens: the largest root frame wins (issue #447)
+
+do {
+  let viewport = CGSize(width: 320, height: 480)
+  let outer = CGRect(x: 0, y: 0, width: 466, height: 678)
+  let inner = CGRect(x: 0, y: 0, width: 669, height: 951)
+  // iPhone Duo, inner display open: SpringBoard's root (or a read taken folded) said 466x678 while
+  // the foreground app's root, which the element tree reports, is 669x951.
+  let natural = IPURScreenSizeFromFrames([outer, inner], 2, viewport)
+  check(natural == inner.size, "the inner display's app root replaces the outer display's frame")
+  let portrait = ScreenOrientation.size(natural: natural, interfaceOrientation: 1)
+  check(TapBounds.firstOffScreen([[["x": 100, "y": 870]]], portrait) == nil,
+        "the reported scroll point (100, 870) is on the 669x951 screen")
+  check(TapBounds.firstOffScreen([[["x": 125, "y": 919]]], portrait) == nil,
+        "the reported sidebar point (125, 919) is on the 669x951 screen")
+  check(!TapBounds.onScreen(CGPoint(x: 100, y: 960), portrait),
+        "a point beyond the inner display is still refused")
+  check(IPURPortraitPoint(CGPoint(x: 100, y: 870), 2, natural) == CGPoint(x: 569, y: 81),
+        "upside down, the touch is turned within the inner display")
+  check(IPURScreenSizeFromFrames([outer], 1, viewport) == outer.size,
+        "folded, the outer display is the screen")
+  // An app root smaller than the system frame (a compatibility-sized app) never shrinks it, and a
+  // landscape root compares by area with a portrait one.
+  let phone = CGRect(x: 0, y: 0, width: 393, height: 852)
+  check(IPURScreenSizeFromFrames([phone, CGRect(x: 0, y: 0, width: 320, height: 568)], 2, viewport) == phone.size,
+        "a smaller app root keeps the system frame")
+  check(IPURScreenSizeFromFrames([CGRect(x: 0, y: 0, width: 852, height: 393), phone], 2, viewport)
+          == CGSize(width: 852, height: 393),
+        "equal screens either way round keep the first")
+  check(IPURScreenSizeFromFrames([CGRect.zero, CGRect(x: 10, y: 0, width: 669, height: 951), phone], 3, viewport)
+          == phone.size,
+        "invalid and offset frames are skipped")
+  check(IPURScreenSizeFromFrames([CGRect.zero, CGRect.null], 2, viewport) == viewport,
+        "no valid frame keeps the fallback")
+  check(IPURScreenSizeFromFrames([], 0, viewport) == viewport, "no frames keeps the fallback")
+}
+
 // MARK: - Touch points turned to the portrait screen
 
 do {

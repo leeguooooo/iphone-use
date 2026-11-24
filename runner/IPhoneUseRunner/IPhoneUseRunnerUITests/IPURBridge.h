@@ -98,11 +98,12 @@ FOUNDATION_EXPORT NSString *const IPURNodeAXElementKey;
 /// within 250 ms share one answer.
 + (NSInteger)interfaceOrientation;
 
-/// Main screen points from a shallow SpringBoard snapshot, falling back to UIKit when the
-/// system frame is unavailable. The runner host's UIScreen can be a 320x480 compatibility
-/// viewport; both bounds checks and synthesized touch conversion must use the system frame.
-/// A valid system frame is kept for the runner's lifetime; the UIKit fallback only for one
-/// command request, so the system frame is tried again.
+/// Screen points from shallow snapshots of the SpringBoard root and the active applications'
+/// roots (the largest valid frame), falling back to UIKit when none is available. The runner
+/// host's UIScreen can be a 320x480 compatibility viewport; both bounds checks and synthesized
+/// touch conversion must use the system frame. A snapshot answer is kept for one second, so a
+/// foldable that changes screens (issue #447) is noticed; the UIKit fallback only for one
+/// command request, so the snapshots are tried again.
 + (CGSize)screenSizePoints;
 
 /// Process id of an XCUIApplication (private `processID`), or 0.

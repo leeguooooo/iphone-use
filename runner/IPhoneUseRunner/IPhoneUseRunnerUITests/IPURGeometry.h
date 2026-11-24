@@ -16,6 +16,23 @@ static inline CGSize IPURScreenSizeFromFrame(CGRect systemFrame, CGSize fallback
   return fallback;
 }
 
+/// The screen the UI is drawn on, from screen-space frames read together: the system
+/// application's and each active application's root. The largest valid one wins (by area, so
+/// either orientation compares alike); none valid gives `fallback`. On a foldable (iPhone Duo,
+/// issue #447) the open inner display is 669x951 while a read taken folded, or a SpringBoard root
+/// that still describes the outer display, is 466x678: the foreground app's root, which the
+/// element tree reports as the screen, then carries the real size. An app root that is smaller
+/// than the system frame (a compatibility-sized app) never shrinks it.
+static inline CGSize IPURScreenSizeFromFrames(const CGRect *frames, size_t count, CGSize fallback)
+{
+  CGSize best = CGSizeZero;
+  for (size_t i = 0; i < count; i++) {
+    CGSize size = IPURScreenSizeFromFrame(frames[i], CGSizeZero);
+    if (size.width * size.height > best.width * best.height) best = size;
+  }
+  return best.width > 0 ? best : fallback;
+}
+
 /// Where a point in the interface's coordinates (UIInterfaceOrientation raw value
 /// `interfaceOrientation`, the space /window/size and the element rects use) sits in the screen's
 /// portrait coordinates, which XCPointerEventPath points are read in. `natural` is the screen in
