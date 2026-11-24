@@ -629,7 +629,18 @@ pub struct Form {
     pub password: Option<usize>,
     pub code: Option<usize>,
     /// More than one password field means sign-up or a password change.
+    /// Counted over the whole page, off-screen fields included.
     pub secure_fields: usize,
+    /// A password field labelled as a new or repeated password: a reset page
+    /// or a password change even when it is the only one in the tree.
+    pub sets_password: bool,
+}
+
+impl Form {
+    /// Sign-up, a password change or a reset: never filled automatically.
+    pub fn not_a_login(&self) -> bool {
+        self.secure_fields >= 2 || self.sets_password
+    }
 }
 
 const TOKEN_HINTS: &[&str] = &[
@@ -649,11 +660,42 @@ fn token_field(row: &ElementRow) -> bool {
     TOKEN_HINTS.iter().any(|hint| text.contains(hint))
 }
 
+/// Labels of a password field that sets a new password: filling the vault's
+/// password there would change the account's password (issue #448). A
+/// confirm or re-enter field alone is left to the field count — on its own it
+/// is usually a re-auth prompt, like a lone current-password field.
+const NEW_PASSWORD_HINTS: &[&str] = &[
+    "new password",
+    "新密码",
+    "新密碼",
+    "新しいパスワード",
+    "新規パスワード",
+];
+
+fn sets_a_password(row: &ElementRow) -> bool {
+    let text = describe(row);
+    NEW_PASSWORD_HINTS.iter().any(|hint| text.contains(hint))
+}
+
 pub fn read_form(rows: &[ElementRow]) -> Form {
-    let secure: Vec<usize> = (0..rows.len())
+    // Every password field on the page counts, on screen or not: a web form
+    // scrolled so that only its new-password field shows still has its
+    // current-password field in the tree (`visible:false`), and counting only
+    // the visible one filled the new password (issue #448, a WKWebView
+    // profile page). A field with no frame at all is a hidden input and does
+    // not count.
+    let all_secure: Vec<usize> = (0..rows.len())
         .filter(|&i| {
-            rows[i].kind == "SecureTextField" && usable(&rows[i]) && !token_field(&rows[i])
+            rows[i].kind == "SecureTextField"
+                && rows[i].rect[2] > 0.0
+                && rows[i].rect[3] > 0.0
+                && !token_field(&rows[i])
         })
+        .collect();
+    let secure: Vec<usize> = all_secure
+        .iter()
+        .copied()
+        .filter(|&i| usable(&rows[i]))
         .collect();
     let text: Vec<usize> = (0..rows.len())
         .filter(|&i| rows[i].kind == "TextField" && usable(&rows[i]))
@@ -677,11 +719,14 @@ pub fn read_form(rows: &[ElementRow]) -> Form {
             None if code.is_none() && others.len() == 1 => Some(others[0]),
             None => None,
         });
+    let sets_password = all_secure.iter().any(|&i| sets_a_password(&rows[i]));
     Form {
         account,
-        password: (secure.len() == 1).then(|| secure[0]),
+        password: (all_secure.len() == 1 && secure.len() == 1 && !sets_password)
+            .then(|| secure[0]),
         code,
-        secure_fields: secure.len(),
+        secure_fields: all_secure.len(),
+        sets_password,
     }
 }
 
@@ -1405,7 +1450,7 @@ pub async fn sign_in(
     let page_host = if web_sheet { sheet_host(&rows) } else { None };
     let matched = matched_app(bundle.as_deref(), web_sheet, page_host.as_deref());
     let mut form = read_form(&rows);
-    if form.secure_fields >= 2 {
+    if form.not_a_login() {
         return Err(not_a_login_form());
     }
     if form.account.is_none() && form.password.is_none() {
@@ -1457,7 +1502,7 @@ pub async fn sign_in(
             // by its role on a fresh read, not by the frame it had before.
             rows = w.elements().await.map_err(|_| phone_error("screen read"))?;
             form = read_form(&rows);
-            if form.secure_fields >= 2 {
+            if form.not_a_login() {
                 return Err(not_a_login_form());
             }
         }
@@ -1513,7 +1558,7 @@ pub async fn sign_in(
         };
         rows = next_screen(w, &before, Duration::from_secs(6)).await;
         form = read_form(&rows);
-        if form.secure_fields >= 2 {
+        if form.not_a_login() {
             return Err(not_a_login_form());
         }
     }
@@ -1593,7 +1638,7 @@ fn not_a_login_form() -> LoginError {
     LoginError::new(
         422,
         "not_a_login_form",
-        "this screen has more than one password field (sign-up or a password change); only an existing account's login is filled",
+        "this page has more than one password field, counting ones scrolled off screen, or a new-password field (sign-up, a password change or a reset); no password was typed. Only an existing account's login is filled: fill a password-change form by hand with the user",
     )
 }
 
@@ -2302,6 +2347,77 @@ mod tests {
             None,
             "never a sign-up button"
         );
+    }
+
+    #[test]
+    fn a_password_field_scrolled_off_screen_still_counts() {
+        // Issue #448, reproduced on a simulator: a WKWebView page with
+        // 現在のパスワード scrolled above the screen and 新規パスワード in view.
+        // The tree keeps the off-screen field with `visible:false`; counting
+        // only the visible one filled the new password.
+        let mut current = row("SecureTextField", "現在のパスワード", -1021.0);
+        current.visible = Some(false);
+        let rows = vec![current, row("SecureTextField", "パスワード", 634.0)];
+        let form = read_form(&rows);
+        assert_eq!(form.secure_fields, 2);
+        assert_eq!(form.password, None);
+        assert!(form.not_a_login());
+
+        // A disabled second field counts too.
+        let mut disabled = row("SecureTextField", "Password", 300.0);
+        disabled.enabled = Some(false);
+        let rows = vec![row("SecureTextField", "Password", 200.0), disabled];
+        assert!(read_form(&rows).not_a_login());
+
+        // A hidden input with no frame is not a field anyone fills.
+        let mut hidden = row("SecureTextField", "", 0.0);
+        hidden.rect = [0.0, 0.0, 0.0, 0.0];
+        let rows = vec![
+            row("TextField", "Email", 200.0),
+            row("SecureTextField", "Password", 260.0),
+            hidden,
+        ];
+        let form = read_form(&rows);
+        assert_eq!(form.secure_fields, 1);
+        assert_eq!(form.password, Some(1));
+        assert!(!form.not_a_login());
+    }
+
+    #[test]
+    fn a_lone_new_password_field_is_not_a_login() {
+        for label in ["新規パスワード", "New password", "新しいパスワード", "新密码"] {
+            let rows = vec![row("SecureTextField", label, 300.0)];
+            let form = read_form(&rows);
+            assert!(form.not_a_login(), "{label}");
+            assert_eq!(form.password, None, "{label}");
+        }
+        // The placeholder says it as well as a label would.
+        let mut field = row("SecureTextField", "", 300.0);
+        field.placeholder = Some("Enter a new password".to_string());
+        assert!(read_form(&[field]).not_a_login());
+        // A login's own password field (or a re-auth's current one) is filled.
+        for label in [
+            "Password",
+            "パスワード",
+            "现在的密码",
+            "Current password",
+            "現在のパスワード",
+            "Confirm password",
+        ] {
+            let form = read_form(&[row("SecureTextField", label, 300.0)]);
+            assert!(!form.not_a_login(), "{label}");
+            assert_eq!(form.password, Some(0), "{label}");
+        }
+    }
+
+    #[test]
+    fn an_only_password_field_off_screen_is_counted_but_not_filled() {
+        let mut field = row("SecureTextField", "Password", 1200.0);
+        field.visible = Some(false);
+        let form = read_form(&[row("TextField", "Email", 200.0), field]);
+        assert_eq!(form.secure_fields, 1);
+        assert_eq!(form.password, None);
+        assert!(!form.not_a_login());
     }
 
     #[test]

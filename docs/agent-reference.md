@@ -971,7 +971,7 @@ always read `••••••••`.
 | `ambiguous_vault_entry` + `candidates` | Ask the user which entry; pass its name as `item` (and `user` when names repeat). |
 | `no_vault_entry` | Ask the user which entry to use. Never guess. |
 | `vault_locked` | Ask the user to unlock the vault on the Mac (`bwu unlock`). |
-| `not_a_login_form` | Two password fields: sign-up or a password change. Not done automatically. |
+| `not_a_login_form` | More than one password field on the page (ones scrolled off screen count), or a field labelled as a new password: sign-up, a password change or a reset. Nothing was typed into a password field. Not done automatically. |
 | `value_not_applied` | The account field rejected the typed text (a composing keyboard): ask the user to switch the phone's keyboard to English. |
 | `value_landed_elsewhere` | Typing went into another field; that field was cleared at once. Finish this login by hand with the user. |
 
