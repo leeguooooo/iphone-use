@@ -975,6 +975,22 @@ async fn fill(
     if w.type_into(&id, secret.expose()).await.is_ok() && holds(w, &id, row, secret).await {
         return Ok(());
     }
+    type_like_a_person(w, row, &id, secret, what).await
+}
+
+/// The keyboard half of [`fill`]: focus the field with a tap where it is now
+/// and type into the focus, then make sure the text landed there and nowhere
+/// else. Also the fallback of `set_value` on a password field a web view
+/// would not take a direct write into (issue #449), so the caller never has
+/// to spell a password out key by key.
+pub(crate) async fn type_like_a_person(
+    w: &mut RunnerClient,
+    row: &ElementRow,
+    id: &str,
+    secret: &Secret,
+    what: &'static str,
+) -> Result<(), LoginError> {
+    let id = id.to_string();
     let _ = w.clear_element(&id).await;
     // Tap the element where it is now, not where the tree read saw it: a page
     // that shifted in between turned a frame tap into a tap on another field.

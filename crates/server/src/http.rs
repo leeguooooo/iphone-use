@@ -8290,9 +8290,7 @@ async fn set_value_snapshot_element(
         .map_err(set_value_dispatch_error)?;
     let typed = w.type_into(&element_id, &text).await;
     if secure {
-        // A secure field reads back as bullets; nothing to compare.
-        set_value_verification(detail, false, "secure_field");
-        return typed.map_err(set_value_dispatch_error);
+        return secure_set_value_outcome(w, row, &element_id, &text, typed, allowed, detail).await;
     }
     // Read the field back. Web inputs (WKWebView, Chrome) and some custom
     // fields acknowledge a direct value write and keep their old contents
@@ -8326,6 +8324,105 @@ async fn set_value_snapshot_element(
         ))),
         // No readback: keep the dispatch outcome as runner reported it.
         _ => typed.map_err(set_value_dispatch_error),
+    }
+}
+
+/// What a password field's value shows after a write. Its text can never be
+/// read back: it reads as dots, a web view's a fixed eight whatever the
+/// length (simulator, iOS 27.2). Only an empty
+/// field — no value, or its placeholder, which an empty web input reports as
+/// its value — proves the write did not land.
+#[derive(Debug, PartialEq)]
+enum SecureReadback {
+    Filled,
+    Empty,
+    Unknown,
+}
+
+fn secure_readback(value: Option<&str>, placeholder: Option<&str>) -> SecureReadback {
+    let dots = |text: &str| {
+        !text.is_empty() && text.chars().all(|c| matches!(c, '•' | '●' | '∙' | '*'))
+    };
+    let Some(value) = value.map(str::trim) else {
+        return SecureReadback::Unknown;
+    };
+    if value.is_empty() {
+        return SecureReadback::Empty;
+    }
+    let placeholder = placeholder.map(str::trim).filter(|p| !p.is_empty());
+    // A placeholder drawn as dots reads like a filled field.
+    if placeholder.is_some_and(dots) {
+        return SecureReadback::Unknown;
+    }
+    if Some(value) == placeholder {
+        SecureReadback::Empty
+    } else if dots(value) {
+        SecureReadback::Filled
+    } else {
+        SecureReadback::Unknown
+    }
+}
+
+const SECURE_SET_VALUE_NOT_APPLIED_HINT: &str = "the password field is still empty: neither the direct write nor typing into it after a tap reached it (web views often ignore direct writes), and nothing was left in it. Read the screen: a sheet or another field may have taken the focus. Or use phone_login (POST /agent/login) to sign in from the password vault";
+const SECURE_SET_VALUE_SHEET_HINT: &str = "iOS's password picker opened over the field and would not close, so the password was not typed and the field is empty. Close the picker on the phone, then send set_value again";
+
+/// `set_value` on a password field: the direct write, read back as far as a
+/// password field can be (issue #449: a web view's field acknowledged the
+/// write and stayed empty, and `ok:true` came back). An empty field gets the
+/// keyboard fallback phone_login uses — a tap on the field, then the value
+/// typed into the focus inside the daemon — so the caller never has to tap a
+/// password out key by key.
+async fn secure_set_value_outcome(
+    w: &mut crate::runner::RunnerClient,
+    row: &crate::runner::ElementRow,
+    element_id: &str,
+    text: &str,
+    typed: anyhow::Result<()>,
+    allowed: &(dyn Fn() -> bool + Sync),
+    detail: &mut Option<serde_json::Value>,
+) -> Result<(), SnapshotElementTapError> {
+    let now = w.element_value(element_id).await.ok().flatten();
+    match (typed, secure_readback(now.as_deref(), row.placeholder.as_deref())) {
+        (Ok(()), SecureReadback::Filled | SecureReadback::Unknown) => {
+            set_value_verification(detail, false, "secure_field");
+            return Ok(());
+        }
+        (Err(error), SecureReadback::Filled | SecureReadback::Unknown) => {
+            return Err(set_value_dispatch_error(error));
+        }
+        (_, SecureReadback::Empty) => {}
+    }
+    if !allowed() {
+        return Err(SnapshotElementTapError::NoEffect(
+            "value_not_applied",
+            SECURE_SET_VALUE_NOT_APPLIED_HINT,
+        ));
+    }
+    let secret = crate::login::Secret::new(text.to_string());
+    match crate::login::type_like_a_person(w, row, element_id, &secret, "password").await {
+        Ok(()) => {
+            set_value_verification(detail, false, "secure_field");
+            Ok(())
+        }
+        // The field was cleared again after the attempt.
+        Err(error) if error.error == "value_not_applied" => Err(SnapshotElementTapError::NoEffect(
+            "value_not_applied",
+            SECURE_SET_VALUE_NOT_APPLIED_HINT,
+        )),
+        // Nothing was typed.
+        Err(error) if error.error == "autofill_sheet" => Err(SnapshotElementTapError::NoEffect(
+            "autofill_sheet",
+            SECURE_SET_VALUE_SHEET_HINT,
+        )),
+        Err(error) if error.error == "value_landed_elsewhere" => {
+            Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!(
+                "set_value: the password went into another field and was cleared from it; read the screen before trying again"
+            )))
+        }
+        // The runner's own error text is not passed on: it can quote the typed text.
+        Err(_) => Err(SnapshotElementTapError::AfterDispatch(anyhow::anyhow!(
+            "set_value: typing the password after a tap did not complete; read the screen before trying again"
+        ))),
     }
 }
 
@@ -10742,7 +10839,7 @@ fn input_target_refusal(error: &anyhow::Error) -> Option<RunnerControlOutcome> {
     } else if message.starts_with("input_target_secure_field_requires_human") {
         Some(RunnerControlOutcome::Refused(
             "secure_field_use_set_value",
-            "the focused field is a password field, which free typing never fills, so nothing was typed; send set_value with the field's element and snapshot from a fresh elements read (its value cannot be read back, so check the screen), or use phone_login (POST /agent/login) to sign in from the password vault",
+            "the focused field is a password field, which free typing never fills, so nothing was typed; send set_value with the field's element and snapshot from a fresh elements read (it types the value in itself when a web view ignores the direct write, and answers 409 value_not_applied when the field stays empty; a password's text is never read back, so check the screen), or use phone_login (POST /agent/login) to sign in from the password vault",
         ))
     } else if message.starts_with("newline_requires_multiline_field") {
         Some(RunnerControlOutcome::Refused(
@@ -30889,6 +30986,24 @@ mod tests {
         assert!(input_target_refusal(&runner("input_target_tree_incomplete; nothing was sent")).is_none());
         assert!(input_target_refusal(&runner("input_target_ambiguous_or_missing")).is_none());
         assert!(input_target_refusal(&anyhow::anyhow!("connection reset")).is_none());
+    }
+
+    #[test]
+    fn a_password_field_readback_only_proves_empty_or_filled() {
+        use SecureReadback::*;
+        // Web view, empty: the placeholder is reported as the value.
+        assert_eq!(secure_readback(Some("Password"), Some("Password")), Empty);
+        assert_eq!(secure_readback(Some(""), None), Empty);
+        assert_eq!(secure_readback(Some("  "), Some("パスワード")), Empty);
+        // Filled: dots, whatever their count.
+        assert_eq!(secure_readback(Some("••••••••"), Some("Password")), Filled);
+        assert_eq!(secure_readback(Some("•••"), None), Filled);
+        // Nothing to go on.
+        assert_eq!(secure_readback(None, Some("Password")), Unknown);
+        assert_eq!(secure_readback(Some("something"), Some("Password")), Unknown);
+        // A placeholder drawn as dots makes dots meaningless.
+        assert_eq!(secure_readback(Some("••••"), Some("••••")), Unknown);
+        assert_eq!(secure_readback(Some(""), Some("••••")), Empty);
     }
 
     #[test]

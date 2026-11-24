@@ -468,6 +468,9 @@ Full reference: **[`docs/agent-api.html`](agent-api.html)**. The bundled skill
 - **`set_value` is read back.** A field that kept its old contents (web views often
   ignore direct writes) answers `409 value_not_applied`, `outcome:"no_effect"`; tap the
   field and send `text` instead. Formatting the field adds itself still counts as applied.
+  A password field cannot be read, only seen to be empty: when it stays empty
+  `set_value` taps it and types the value in itself, and answers `409 value_not_applied`
+  only when it is still empty after that.
 - **Screens hidden from capture** (PayPay, banks, wallets) come back from
   `/agent/screenshot` as a wireframe with `X-Capture-Redacted: 1`. Drive them by
   elements; never run vision on a blank capture.

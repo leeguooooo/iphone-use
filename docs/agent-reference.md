@@ -417,7 +417,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"tap_locator","locator":{"identifier":"save"}}  // label/identifier/kind/value/focused/enabled/visible
 {"type":"tap","x":0.5,"y":0.3}                          // last resort
 {"type":"text","text":"Health"}                         // into the FOCUSED field; up to 20000 chars (see long text below)
-{"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views)
+{"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views); password fields fall back to typing by themselves
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
 {"type":"shortcut","name":"home"}                       // home | spotlight | save_screenshot | volume_up | volume_down (switcher is unsupported)
@@ -729,7 +729,11 @@ is no longer cached). The action result and the observation are separate facts:
   A longer wait is several batches.
 - Password fields (`SecureTextField`) refuse free typing with
   `secure_field_use_set_value`. Send `set_value` with the field's element and
-  snapshot; its value cannot be read back, so check the screen. `phone_login`
+  snapshot. When a web view ignores the direct write and the field stays empty,
+  `set_value` taps the field and types the value in itself; a field still empty
+  after that answers `409 value_not_applied`. A password's text never reads back
+  (a web field shows eight dots for any length), so `ok:true` means "not empty":
+  check the screen or the page's own feedback. `phone_login`
   (`POST /agent/login`) signs in from the password vault.
 - Web content and remote views (the system document picker, a web sign-in sheet)
   are served by a process other than the app. Element taps reach them. The

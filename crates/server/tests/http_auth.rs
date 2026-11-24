@@ -4459,9 +4459,18 @@ fn control_against_clear(
     block(async move {
         let seen = Arc::new(Mutex::new(Vec::<String>::new()));
         let log = seen.clone();
+        // "before|after": the field reads `before` until keys were typed.
+        let (value_before_keys, value_after_keys) =
+            value_now.split_once('|').unwrap_or((value_now, value_now));
         let (base, _server) = mock_runner_at_most(64, move |request, _| {
             let line = request.lines().next().unwrap_or("").to_string();
             log.lock().unwrap().push(line.clone());
+            let keys_typed = log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.starts_with("POST") && line.contains("/wda/keys "));
+            let value_now = if keys_typed { value_after_keys } else { value_before_keys };
             let ok = |body: String| Some((std::time::Duration::ZERO, body));
             if request.starts_with("POST /session ") {
                 ok(r#"{"value":{"sessionId":"SESSION"}}"#.to_string())
@@ -4624,6 +4633,76 @@ fn set_value_that_reads_back_formatted_is_applied() {
         serde_json::json!({"type":"set_value","element":1,"value":"09012345678","ttl_ms":2000}),
     );
     assert_eq!(status, StatusCode::OK, "{json}; requests={lines:?}");
+}
+
+const ONE_WEB_PASSWORD_FIELD: &str = r#"{"value":{"type":"XCUIElementTypeApplication","label":"Shop","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeWebView","label":"WebView","rect":{"x":0,"y":0,"width":390,"height":844},"children":[{"type":"XCUIElementTypeSecureTextField","label":"Password","placeholderValue":"Password","value":"Password","rect":{"x":8,"y":215,"width":240,"height":34}}]}]}}"#;
+
+#[test]
+fn set_value_on_a_password_field_that_stays_empty_is_not_applied() {
+    // Issue #449: a web view's password field acknowledged the write and
+    // still showed its placeholder; ok:true came back. Now the keyboard
+    // fallback runs, and a field that is still empty answers 409.
+    for empty in ["Password", ""] {
+        let (status, json, lines) = control_against(
+            ONE_WEB_PASSWORD_FIELD,
+            empty,
+            true,
+            serde_json::json!({"type":"set_value","element":2,"value":"s3cr.t","ttl_ms":2000}),
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{json}; requests={lines:?}");
+        assert_eq!(json["error"], "value_not_applied");
+        assert_eq!(json["outcome"], "no_effect");
+        assert!(
+            json["hint"].as_str().is_some_and(|hint| hint.contains("still empty")),
+            "{json}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("POST") && line.contains("/wda/keys ")),
+            "the keyboard fallback ran: {lines:?}"
+        );
+        assert!(!json.to_string().contains("s3cr.t"), "{json}");
+    }
+}
+
+#[test]
+fn set_value_on_a_password_field_falls_back_to_typing_after_a_tap() {
+    // The direct write leaves the web field empty; typing into it after a
+    // tap fills it, and that is a success.
+    let (status, json, lines) = control_against(
+        ONE_WEB_PASSWORD_FIELD,
+        "Password|••••••••",
+        true,
+        serde_json::json!({"type":"set_value","element":2,"value":"s3cr.t","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}; requests={lines:?}");
+    let keys = lines.iter().position(|line| line.starts_with("POST") && line.contains("/wda/keys "));
+    let tap = lines.iter().position(|line| line.starts_with("POST") && line.contains("/actions "));
+    assert!(tap.is_some() && keys.is_some() && tap < keys, "tap, then type: {lines:?}");
+    assert!(
+        !lines[keys.unwrap()..].iter().any(|line| line.contains("/clear ")),
+        "a filled field is not cleared again: {lines:?}"
+    );
+}
+
+#[test]
+fn set_value_on_a_password_field_that_shows_dots_is_applied() {
+    // A web view shows a fixed eight dots for any length (simulator, iOS
+    // 27.2), so the dots prove the field is filled, not its length.
+    let (status, json, lines) = control_against(
+        ONE_WEB_PASSWORD_FIELD,
+        "••••••••",
+        true,
+        serde_json::json!({"type":"set_value","element":2,"value":"s3cr.t","ttl_ms":2000}),
+    );
+    assert_eq!(status, StatusCode::OK, "{json}; requests={lines:?}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("GET") && line.contains("/attribute/value")),
+        "the field was read back: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("/wda/keys ")),
+        "no fallback once the field is filled: {lines:?}"
+    );
 }
 
 #[test]

@@ -195,7 +195,7 @@ curl -s -H "$AUTH" -H "$MUTATION" -H "$OWNER" -X POST "$HOST/agent/actions" -d '
 | Take a screenshot after every step | `observe:true` / `?return=delta` returns the change |
 | One tap per call when the next steps are visible | One `phone_run_steps` / `/agent/actions` batch with `wait_for` |
 | `sleep` a fixed number of seconds | `wait_for` with `present` / `absent` / `application` (`ocr_present` when the screen is a canvas) |
-| Type a password with `phone_type` | It is refused (`secure_field_use_set_value`): use `set_value` with the field's element and snapshot, or `phone_login` |
+| Type a password with `phone_type` | It is refused (`secure_field_use_set_value`): use `set_value` with the field's element and snapshot (it types the value in itself when a web view ignores the write; `409 value_not_applied` means the field stayed empty), or `phone_login` |
 | Search in the system file picker (Files / document picker) | Its search field takes focus in another process, so typing is refused (`no_focused_field`); open folders with element taps instead |
 | Several phone tools in parallel in one turn | One action at a time per phone: parallel calls run in no fixed order and their `observe` results overlap; put several actions in one batch |
 | A `wait_for` longer than 30 s or a `pause` longer than 3 s | Both are refused before anything is sent. `wait_for` `timeout_ms` is at most 30000 (60000 for `ocr_*`); `pause` / `after_ms` at most 3000; all waits in one batch add up to at most 60000. Split a longer wait into several batches |
