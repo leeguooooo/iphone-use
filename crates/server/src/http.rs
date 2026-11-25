@@ -6649,6 +6649,42 @@ async fn agent_runner_handoff(State(state): State<Arc<AppState>>, headers: Heade
             );
         }
     }
+    if health.up
+        && health.locked == Some(true)
+        && !human_handoff_active()
+        && state.runner_lifecycle.current() != RunnerLifecycleTransition::Releasing
+    {
+        let endpoint = client.keep_awake_endpoint();
+        if let Ok(Ok(report)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.read()).await
+        {
+            if report.locked.is_some() || report.passcode.is_some() || report.auto_lock.is_some() {
+                crate::lock_readiness::note_runner_report(&report);
+            }
+            if report.locked == Some(true) && report.passcode == Some(false) {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), client.unlock()).await
+                {
+                    Ok(Ok(())) => {
+                        tracing::info!(
+                            "runner handoff: the phone was locked (no passcode); unlocked it during handoff"
+                        );
+                        (health, error) = handoff_probe(&mut client).await;
+                        if health.up && health.locked == Some(false) {
+                            crate::keep_awake::note_unlocked();
+                        }
+                    }
+                    Ok(Err(unlock_error)) => {
+                        tracing::info!(
+                            "runner handoff: the phone is locked without a passcode, but unlock failed: {unlock_error:#}"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::info!("runner handoff: unlocking the phone timed out");
+                    }
+                }
+            }
+        }
+    }
     drop(client);
     let lifecycle = state.runner_lifecycle.current();
     if lifecycle == RunnerLifecycleTransition::Active {
@@ -29808,6 +29844,109 @@ mod tests {
             assert_eq!(body["error"], "control_scope_changed");
             assert_eq!(body["outcome"], "unknown");
             assert_eq!(body["retry_safe"], false);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn runner_handoff_unlocks_a_locked_phone_without_a_passcode() {
+        block(async {
+            use tower::ServiceExt;
+            let unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let unlocked_flag = unlocked.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    unlocked_flag.store(true, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                let is_locked = !unlocked_flag.load(std::sync::atomic::Ordering::Acquire);
+                if request.contains("/wda/keepawake") {
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            state
+                .released
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let (response, body) = read_json_response(response).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body.unwrap();
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["actionable"], true);
+            assert_eq!(body["locked"], false);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+            assert!(!state.released.load(std::sync::atomic::Ordering::Acquire));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn runner_handoff_does_not_unlock_a_passcode_phone() {
+        block(async {
+            use tower::ServiceExt;
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":true}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let (response, body) = read_json_response(response).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body.unwrap();
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["locked"], true);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
             runner.shutdown();
         });
     }
