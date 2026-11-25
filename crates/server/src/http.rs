@@ -10361,6 +10361,27 @@ fn is_capture_or_volume(value: &serde_json::Value) -> bool {
             .is_some_and(|name| matches!(name, "save_screenshot" | "volume_up" | "volume_down"))
 }
 
+fn is_lock_shortcut(value: &serde_json::Value) -> bool {
+    value.get("type").and_then(serde_json::Value::as_str) == Some("shortcut")
+        && value.get("name").and_then(serde_json::Value::as_str) == Some("lock")
+}
+
+fn mark_runner_locked(state: &Arc<AppState>, scope: &ScreenReadScope) {
+    let _ = state.runner_lifecycle.publish_if_active_stamp(scope.lifecycle_stamp, || {
+        if state.released.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+            up: true,
+            actionable: false,
+            locked: Some(true),
+        };
+        state
+            .runner_actionable
+            .store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
 fn system_request_private_refusal(state: &AppState, value: &serde_json::Value) -> Option<Response> {
     (is_capture_or_volume(value) && screen_private_now(&state.private_until)).then(||
         ControlRefusal::new(StatusCode::LOCKED, SCREEN_PRIVATE, false)
@@ -10681,6 +10702,7 @@ async fn runner_control_with_client(
         "back" => w.back().await,
         "shortcut" => match v.get("name").and_then(|n| n.as_str()) {
             Some("home") => w.press_home().await,
+            Some("lock") => w.lock().await,
             Some(name @ ("volume_up" | "volume_down")) => {
                 let button = if name == "volume_up" { crate::runner::VolumeButton::Up } else { crate::runner::VolumeButton::Down };
                 let scope_changed = || RunnerControlOutcome::Refused("volume_scope_changed",
@@ -12802,9 +12824,9 @@ fn validate_agent_action_value(
             if !action
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|name| matches!(name, "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down"))
+                .is_some_and(|name| matches!(name, "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down" | "lock"))
             {
-                return invalid("shortcut must be home, spotlight, save_screenshot, volume_up or volume_down");
+                return invalid("shortcut must be home, spotlight, save_screenshot, volume_up, volume_down or lock");
             }
         }
         "drag" if action.contains_key("points") => {
@@ -13930,8 +13952,8 @@ async fn agent_actions_scoped(
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
     let single_read_only = matches!(request.steps.as_slice(), [AgentActionStep::WaitFor {timeout_ms: 0, ..}]);
-    let system_request_only = request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if is_capture_or_volume(action)))
-        && !request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if !is_capture_or_volume(action)));
+    let system_request_only = request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if is_capture_or_volume(action) || is_lock_shortcut(action)))
+        && !request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if !is_capture_or_volume(action) && !is_lock_shortcut(action)));
     let has_continuation = request.steps.iter().any(|step| matches!(step, AgentActionStep::Action { action, .. } if is_input_continuation(action)));
     if !system_request_only && !single_read_only && !has_continuation { engage_agent_focus(&state, runner, first_launch.flatten(), true).await; }
     // Long text steps add their typing time (zero for text up to one chunk).
@@ -14276,6 +14298,9 @@ async fn agent_actions_scoped(
                     .await;
                 }
                 applied_actions += 1;
+                if is_lock_shortcut(action) {
+                    mark_runner_locked(&state, &capture_scope);
+                }
                 let rebound_rect=w.activity_rebound_rect.take();
                 record_activity(&state, &headers, action, w.cached_window_size(), &capture_scope, rebound_rect);
                 let mut receipt = serde_json::json!({
@@ -16576,7 +16601,7 @@ async fn agent_input_inner(
     // the focus step (or the action after it) waits for it.
     let _priority = state.begin_runner_control();
     let focus_started = tokio::time::Instant::now();
-    if !is_capture_or_volume(&value) && !is_input_continuation(&value) {
+    if !is_capture_or_volume(&value) && !is_input_continuation(&value) && !is_lock_shortcut(&value) {
         engage_agent_focus(&state, runner, crate::focus::launch_bundle(&value), true).await;
     }
     // A long text gets its typing time on top (zero for text up to one chunk),
@@ -16636,7 +16661,7 @@ async fn agent_input_inner(
         *recover(dispatch_marker.lock()) = Some(client.last_post());
         let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < agent_runner_deadline;
         let outcome = scoped_runner_action(&state, &capture_scope, agent_runner_deadline, async {
-            if !is_capture_or_volume(&value) && !is_input_continuation(&value) {
+            if !is_capture_or_volume(&value) && !is_input_continuation(&value) && !is_lock_shortcut(&value) {
                 if let Err(interrupted) = unlock_before_action(&state, &mut client, agent_runner_deadline, &capture_scope).await {
                     return control_interruption_outcome(interrupted);
                 }
@@ -16663,6 +16688,9 @@ async fn agent_input_inner(
     };
     let activity_rebound_rect=client.activity_rebound_rect.take();
     if outcome==RunnerControlOutcome::Applied {
+        if is_lock_shortcut(&value) {
+            mark_runner_locked(&state, &capture_scope);
+        }
         record_activity(&state,&headers,&value,client.cached_window_size(),&capture_scope,activity_rebound_rect);
     }
     renew_after_long_text(&state, &headers, &value, &capture_scope);
@@ -16672,7 +16700,7 @@ async fn agent_input_inner(
     // `settle_ms` and what is left of the endpoint deadline.
     let mut settled = None;
     let mut alert = None;
-    if want_delta && outcome == RunnerControlOutcome::Applied && capture_scope.current(&state) {
+    if want_delta && outcome == RunnerControlOutcome::Applied && !is_lock_shortcut(&value) && capture_scope.current(&state) {
         // The observation's clock starts HERE, after the action is
         // confirmed — it is not carved out of what the action left of its
         // own deadline. Otherwise a slow action silently eats the
@@ -29028,6 +29056,128 @@ mod tests {
                 Some(true),
                 "the lock state must be published"
             );
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn lock_shortcut_locks_screen_and_skips_unlock_when_already_locked() {
+        block(async {
+            use tower::ServiceExt;
+            let lock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let locks = lock_calls.clone();
+            let unlocks = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                let first_line = request.lines().next().unwrap_or_default();
+                if first_line.contains("/wda/lock") && first_line.starts_with("POST ") {
+                    locks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if first_line.contains("/wda/unlock") {
+                    unlocks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_state_with_runner(runner.base());
+            Arc::get_mut(&mut state).unwrap().managed_runner = false;
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                up: true,
+                actionable: true,
+                locked: Some(false),
+            };
+            state
+                .runner_actionable
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/input")
+                        .header("x-phone-control", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"type":"shortcut","name":"lock"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(lock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            assert!(!state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/input")
+                        .header("x-phone-control", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"type":"shortcut","name":"lock"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(lock_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn agent_actions_accepts_lock_shortcut_and_marks_locked() {
+        block(async {
+            use tower::ServiceExt;
+            let lock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let locks = lock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                let first_line = request.lines().next().unwrap_or_default();
+                if first_line.contains("/wda/lock") && first_line.starts_with("POST ") {
+                    locks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_state_with_runner(runner.base());
+            Arc::get_mut(&mut state).unwrap().managed_runner = false;
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                up: true,
+                actionable: true,
+                locked: Some(false),
+            };
+            state
+                .runner_actionable
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/actions")
+                        .header("x-phone-control", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"steps":[{"kind":"action","action":{"type":"shortcut","name":"lock"}}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(lock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            assert!(!state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
             runner.shutdown();
         });
     }

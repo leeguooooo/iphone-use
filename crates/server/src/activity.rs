@@ -489,6 +489,7 @@ fn describe_words(action: &Value, rows: Option<&[ElementRow]>) -> Line {
         "shortcut" => match name {
             Some("home") => line("Went to the Home Screen", "回到主屏幕"),
             Some("spotlight") => line("Opened Spotlight", "打开 Spotlight 搜索"),
+            Some("lock") => line("Locked the screen", "锁定屏幕"),
             Some(other) => line(
                 format!("Used the {other} shortcut"),
                 format!("使用快捷操作 {other}"),

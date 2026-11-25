@@ -1869,7 +1869,8 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "System shortcut: home, spotlight, volume_up/volume_down (physical device; the ACK confirms \
+        description = "System shortcut: home, spotlight, lock (locks the screen; a passcode-protected phone \
+        requires a person to unlock it again), volume_up/volume_down (physical device; the ACK confirms \
         the request, not the level) or save_screenshot (a mutation, unlike phone_screenshot: the \
         receipt means requested, not saved; if iOS shows a preview choose Done/Save there, never \
         take another; check Photos before claiming saved). Never replay an uncertain capture or \
@@ -1883,7 +1884,7 @@ impl PhoneHandler {
         self.progress_reset();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
-            "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down" => {
+            "home" | "spotlight" | "lock" | "save_screenshot" | "volume_up" | "volume_down" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![ContentBlock::text(
@@ -1892,7 +1893,7 @@ impl PhoneHandler {
                  supported device action instead",
             )]),
             _ => CallToolResult::error(vec![ContentBlock::text(format!(
-                "unsupported shortcut '{name}'; supported: home, spotlight, save_screenshot, volume_up, volume_down"
+                "unsupported shortcut '{name}'; supported: home, spotlight, lock, save_screenshot, volume_up, volume_down"
             ))]),
         }
     }
@@ -4366,9 +4367,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Shortcut { name, after_ms } => {
                 validate_after(after_ms)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !matches!(name.as_str(), "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down") {
+                if !matches!(name.as_str(), "home" | "spotlight" | "lock" | "save_screenshot" | "volume_up" | "volume_down") {
                     return Err(format!(
-                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, save_screenshot, volume_up, volume_down; no action was sent"
+                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, lock, save_screenshot, volume_up, volume_down; no action was sent"
                     ));
                 }
                 action_step(serde_json::json!({"type":"shortcut","name":name}), after_ms)
@@ -5439,6 +5440,22 @@ mod tests {
         let step: PhoneStep = serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"save_screenshot"})).unwrap();
         let request = phone_steps_request(vec![step]).unwrap();
         assert_eq!(request["steps"][0]["action"]["name"], "save_screenshot");
+    }
+
+    #[test]
+    fn lock_shortcut_accepted_by_tool_and_batch_validation() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"transport":"runner"}"#.to_vec());
+        let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+            name: "lock".into(),
+            observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_ne!(result.is_error, Some(true));
+
+        let step: PhoneStep =
+            serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"lock"})).unwrap();
+        let request = phone_steps_request(vec![step]).unwrap();
+        assert_eq!(request["steps"][0]["action"]["name"], "lock");
     }
 
     /// With `observe:false` the result stays the short string callers
