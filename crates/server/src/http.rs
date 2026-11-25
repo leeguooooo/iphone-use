@@ -2316,6 +2316,45 @@ fn target_not_configured_response() -> Response {
     )
 }
 
+async fn try_unlock_on_bringup(
+    client: &mut crate::runner::RunnerClient,
+    context: &str,
+) -> Option<(crate::runner::RunnerHealth, Option<String>)> {
+    let endpoint = client.keep_awake_endpoint();
+    let report = tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.read())
+        .await
+        .ok()?
+        .ok()?;
+    if report.locked.is_some() || report.passcode.is_some() || report.auto_lock.is_some() {
+        crate::lock_readiness::note_runner_report(&report);
+    }
+    if report.locked != Some(true) || report.passcode != Some(false) {
+        return None;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(5), client.unlock()).await {
+        Ok(Ok(())) => {
+            tracing::info!(
+                "{context}: the phone was locked (no passcode); unlocked it on runner bring-up"
+            );
+            let (health, error) = handoff_probe(client).await;
+            if health.up && health.locked == Some(false) {
+                crate::keep_awake::note_unlocked();
+            }
+            Some((health, error))
+        }
+        Ok(Err(unlock_error)) => {
+            tracing::info!(
+                "{context}: the phone is locked without a passcode, but unlock failed: {unlock_error:#}"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::info!("{context}: unlocking the phone timed out");
+            None
+        }
+    }
+}
+
 /// Return cached runner health and, when idle, start one background refresh.
 ///
 /// A cold runner session can legitimately take longer than the old 1.5-second
@@ -2353,14 +2392,28 @@ async fn cached_runner_health(state: &AppState) -> crate::runner::RunnerHealth {
     let death = state.runner_death.clone();
     let read_degraded = state.runner_read_degraded.clone();
     let releasing = state.runner_lifecycle.is_releasing();
+    let was_up = cached.up;
     *probe_slot = Some(tokio::spawn(async move {
         let Ok(mut client) = runner.try_lock() else {
             return;
         };
         match tokio::time::timeout(std::time::Duration::from_secs(15), client.probe_health()).await
         {
-            Ok(health) => {
+            Ok(mut health) => {
                 use std::sync::atomic::Ordering;
+                let was_released = released.load(Ordering::Acquire);
+                if (was_released || !was_up)
+                    && health.up
+                    && health.locked == Some(true)
+                    && !releasing
+                    && !human_handoff_active()
+                {
+                    if let Some((unlocked_health, _)) =
+                        try_unlock_on_bringup(&mut client, "runner health poll").await
+                    {
+                        health = unlocked_health;
+                    }
+                }
                 let degraded = read_degraded.load(Ordering::Acquire);
                 // Only a runner that otherwise looks fine needs the read: if it
                 // is down or not actionable, that already keeps it undrivable.
@@ -6654,35 +6707,11 @@ async fn agent_runner_handoff(State(state): State<Arc<AppState>>, headers: Heade
         && !human_handoff_active()
         && state.runner_lifecycle.current() != RunnerLifecycleTransition::Releasing
     {
-        let endpoint = client.keep_awake_endpoint();
-        if let Ok(Ok(report)) =
-            tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.read()).await
+        if let Some((unlocked_health, unlocked_error)) =
+            try_unlock_on_bringup(&mut client, "runner handoff").await
         {
-            if report.locked.is_some() || report.passcode.is_some() || report.auto_lock.is_some() {
-                crate::lock_readiness::note_runner_report(&report);
-            }
-            if report.locked == Some(true) && report.passcode == Some(false) {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), client.unlock()).await
-                {
-                    Ok(Ok(())) => {
-                        tracing::info!(
-                            "runner handoff: the phone was locked (no passcode); unlocked it during handoff"
-                        );
-                        (health, error) = handoff_probe(&mut client).await;
-                        if health.up && health.locked == Some(false) {
-                            crate::keep_awake::note_unlocked();
-                        }
-                    }
-                    Ok(Err(unlock_error)) => {
-                        tracing::info!(
-                            "runner handoff: the phone is locked without a passcode, but unlock failed: {unlock_error:#}"
-                        );
-                    }
-                    Err(_) => {
-                        tracing::info!("runner handoff: unlocking the phone timed out");
-                    }
-                }
-            }
+            health = unlocked_health;
+            error = unlocked_error;
         }
     }
     drop(client);
@@ -29947,6 +29976,60 @@ mod tests {
             assert_eq!(body["locked"], true);
             assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
             assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn cached_health_unlocks_on_bringup_without_passcode_but_keeps_manual_lock() {
+        block(async {
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let locked_flag = locked.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    locked_flag.store(false, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                let is_locked = locked_flag.load(std::sync::atomic::Ordering::Acquire);
+                if request.contains("/wda/keepawake") {
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            state
+                .released
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+            assert!(!state.released.load(std::sync::atomic::Ordering::Acquire));
+
+            locked.store(true, std::sync::atomic::Ordering::Release);
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            assert!(!state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
             runner.shutdown();
         });
     }
