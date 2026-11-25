@@ -2758,6 +2758,7 @@ async fn run_runner_readiness_wait(
         "managed runner readiness wait started"
     );
     let mut seen_up = false;
+    let mut unlock_attempted = false;
     let mut setup_blocker = String::new();
     // Why the last probe failed, so a reconnect that runs out of time says
     // what it kept hitting instead of only that it did not finish.
@@ -2833,33 +2834,46 @@ async fn run_runner_readiness_wait(
                     Some(false) => {}
                 }
                 if health.up && health.locked == Some(true) {
-                    if let Some(unlocked_health) = try_unlock_during_readiness(
-                        state,
-                        token,
-                        runner,
-                        deadline,
-                        budget.probe,
-                    )
-                    .await
-                    {
-                        if tokio::time::Instant::now() >= deadline {
-                            break RunnerReadinessOutcome::Deadline;
-                        }
-                        let published = state.runner_lifecycle.publish_if_current(token, || {
-                            apply_runner_health_probe(
-                                &state.runner_health,
-                                &state.runner_actionable,
-                                &state.released,
-                                unlocked_health,
-                            )
-                        });
-                        match published {
-                            None => break RunnerReadinessOutcome::Superseded,
-                            Some(true) => {
-                                crate::keep_awake::note_unlocked();
-                                break RunnerReadinessOutcome::Ready;
+                    if !unlock_attempted {
+                        unlock_attempted = true;
+                        if let Some(unlocked_health) = try_unlock_during_readiness(
+                            state,
+                            token,
+                            runner,
+                            deadline,
+                            budget.probe,
+                        )
+                        .await
+                        {
+                            if tokio::time::Instant::now() >= deadline {
+                                break RunnerReadinessOutcome::Deadline;
                             }
-                            Some(false) => {}
+                            let published = state.runner_lifecycle.publish_if_current(token, || {
+                                apply_runner_health_probe(
+                                    &state.runner_health,
+                                    &state.runner_actionable,
+                                    &state.released,
+                                    unlocked_health,
+                                )
+                            });
+                            match published {
+                                None => break RunnerReadinessOutcome::Superseded,
+                                Some(true) => {
+                                    crate::keep_awake::note_unlocked();
+                                    break RunnerReadinessOutcome::Ready;
+                                }
+                                Some(false) if unlocked_health.locked == Some(false) => {
+                                    crate::keep_awake::note_unlocked();
+                                    let remaining =
+                                        deadline.saturating_duration_since(tokio::time::Instant::now());
+                                    if remaining.is_zero() {
+                                        break RunnerReadinessOutcome::Deadline;
+                                    }
+                                    tokio::time::sleep(budget.poll.min(remaining)).await;
+                                    continue;
+                                }
+                                Some(false) => {}
+                            }
                         }
                     }
                     break RunnerReadinessOutcome::Locked;
