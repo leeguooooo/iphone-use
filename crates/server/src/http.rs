@@ -29066,13 +29066,20 @@ mod tests {
             use tower::ServiceExt;
             let lock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let locks = lock_calls.clone();
             let unlocks = unlock_calls.clone();
+            let locked_flag = locked.clone();
             let mut runner = MockRunner::start(move |request| {
                 let first_line = request.lines().next().unwrap_or_default();
                 if first_line.contains("/wda/lock") && first_line.starts_with("POST ") {
                     locks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    locked_flag.store(true, std::sync::atomic::Ordering::Release);
                     return r#"{"value":null}"#.to_string();
+                }
+                if first_line.contains("/wda/locked") {
+                    let is_locked = locked_flag.load(std::sync::atomic::Ordering::Acquire);
+                    return format!(r#"{{"value":{is_locked}}}"#);
                 }
                 if first_line.contains("/wda/unlock") {
                     unlocks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -29137,12 +29144,19 @@ mod tests {
         block(async {
             use tower::ServiceExt;
             let lock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let locks = lock_calls.clone();
+            let locked_flag = locked.clone();
             let mut runner = MockRunner::start(move |request| {
                 let first_line = request.lines().next().unwrap_or_default();
                 if first_line.contains("/wda/lock") && first_line.starts_with("POST ") {
                     locks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    locked_flag.store(true, std::sync::atomic::Ordering::Release);
                     return r#"{"value":null}"#.to_string();
+                }
+                if first_line.contains("/wda/locked") {
+                    let is_locked = locked_flag.load(std::sync::atomic::Ordering::Acquire);
+                    return format!(r#"{{"value":{is_locked}}}"#);
                 }
                 healthy_runner_responder(request)
             });

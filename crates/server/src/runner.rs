@@ -3037,6 +3037,17 @@ impl RunnerClient {
             .await
             .context("POST wda/lock")?;
         ensure_runner_success(response, "POST wda/lock").await?;
+        self.invalidate_session();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if matches!(
+                tokio::time::timeout(Duration::from_millis(500), self.locked_unattached()).await,
+                Ok(Ok(true))
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
         Ok(())
     }
 }
