@@ -341,7 +341,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "fs2",
@@ -507,7 +507,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 name = "core"
 version = "0.29.4"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "getrandom 0.4.3",
  "hmac",
  "schemars",
@@ -1284,7 +1284,7 @@ version = "0.29.4"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "core",
  "hex",
@@ -2417,7 +2417,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "browser-session",
  "bytes",
  "clap",
