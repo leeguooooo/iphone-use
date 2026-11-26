@@ -143,7 +143,7 @@ pub enum InputMsg {
     Text { text: String },
     /// Device-native named key press.
     Key { name: String },
-    /// Supported shortcuts: `home | spotlight | save_screenshot | volume_up | volume_down`. App Switcher is not
+    /// Supported shortcuts: `home | spotlight | lock | save_screenshot | volume_up | volume_down`. App Switcher is not
     /// available through runner and must not be advertised as supported.
     Shortcut { name: String },
     /// Begin a long-press at normalized coordinates.  Pair with an `Up` event

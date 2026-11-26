@@ -420,7 +420,7 @@ Coordinates are normalized `[0,1]` (`0,0` top-left).
 {"type":"set_value","element":5,"snapshot":"…","value":"你好"}  // write a field directly; 409 value_not_applied → tap + text instead (web views); password fields fall back to typing by themselves
 {"type":"key","name":"return"}                          // return|enter|send|go|search fire Return; escape, space, tab, delete/backspace, arrows
 {"type":"keyboard"}                                     // dismiss the keyboard
-{"type":"shortcut","name":"home"}                       // home | spotlight | save_screenshot | volume_up | volume_down (switcher is unsupported)
+{"type":"shortcut","name":"home"}                       // home | spotlight | lock | save_screenshot | volume_up | volume_down (switcher is unsupported)
 {"type":"scroll","x":0.5,"y":0.5,"dx":0,"dy":80}        // ≈15% of a screen; ≈400 → 75%
 {"type":"scroll","element":7,"snapshot":"…","dy":120}   // inside that element only
 {"type":"scroll","page":true,"dy":300}                  // the page scroller (long web forms); 422 no_page_scroller if none

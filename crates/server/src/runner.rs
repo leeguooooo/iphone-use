@@ -3029,6 +3029,14 @@ impl RunnerClient {
     /// This is a generic runner primitive. Backend selection is persisted at
     /// daemon startup and this method must not be used as a runtime mode switch.
     pub async fn lock(&mut self) -> Result<()> {
+        if matches!(
+            tokio::time::timeout(UNATTACHED_LOCK_BUDGET, self.locked_unattached()).await,
+            Ok(Ok(true))
+        ) {
+            self.last_actionable = false;
+            self.invalidate_session();
+            return Ok(());
+        }
         let sid = self.ensure_session().await?.to_string();
         let response = self
             .post_req(format!("{}/session/{}/wda/lock", self.base, sid))
@@ -3037,18 +3045,36 @@ impl RunnerClient {
             .await
             .context("POST wda/lock")?;
         ensure_runner_success(response, "POST wda/lock").await?;
+        self.last_actionable = false;
         self.invalidate_session();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while tokio::time::Instant::now() < deadline {
-            if matches!(
-                tokio::time::timeout(Duration::from_millis(500), self.locked_unattached()).await,
-                Ok(Ok(true))
-            ) {
+        let mut last_probe_error: Option<String> = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            let probe_budget = remaining.min(Duration::from_millis(500));
+            match tokio::time::timeout(probe_budget, self.locked_unattached()).await {
+                Ok(Ok(true)) => return Ok(()),
+                Ok(Ok(false)) => last_probe_error = None,
+                Ok(Err(error)) => last_probe_error = Some(format!("{error:#}")),
+                Err(_) => last_probe_error = Some("GET /wda/locked timed out".to_string()),
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(remaining.min(Duration::from_millis(150))).await;
         }
-        Ok(())
+        match last_probe_error {
+            Some(error) => Err(anyhow!(
+                "POST wda/lock was accepted, but lock confirmation failed within 2s: {error}"
+            )),
+            None => Err(anyhow!(
+                "POST wda/lock was accepted, but the screen did not report locked within 2s"
+            )),
+        }
     }
 }
 
@@ -6357,5 +6383,239 @@ mod sized_screenshot_tests {
         for cause in ["connect", "runner_error", "other"] {
             assert!(!screenshot_failure_retryable(cause));
         }
+    }
+
+    #[test]
+    fn lock_confirms_delayed_transition_rejects_unconfirmed_and_skips_session_when_locked() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::Arc;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            async fn spawn_mock(
+                handler: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
+            ) -> (String, tokio::task::JoinHandle<()>) {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let handler = Arc::new(handler);
+                let task = tokio::spawn(async move {
+                    while let Ok((mut stream, _)) = listener.accept().await {
+                        let handler = handler.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 4096];
+                            let n = stream.read(&mut buf).await.unwrap_or(0);
+                            if n == 0 {
+                                return;
+                            }
+                            let req = String::from_utf8_lossy(&buf[..n]);
+                            let first_line = req.lines().next().unwrap_or("");
+                            let (status, body) = handler(first_line);
+                            let reason = if status == 200 { "OK" } else { "Internal Server Error" };
+                            let resp = format!(
+                                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                        });
+                    }
+                });
+                (format!("http://{addr}"), task)
+            }
+
+            // 1. Delayed lock confirmation succeeds on the 3rd post-lock poll.
+            let polls = Arc::new(AtomicUsize::new(0));
+            let polls_c = polls.clone();
+            let (base, task) = spawn_mock(move |line| {
+                if line.starts_with("POST /session ") {
+                    (200, r#"{"value":{"sessionId":"S1"}}"#.to_string())
+                } else if line.starts_with("POST /session/S1/wda/lock ") {
+                    (200, r#"{"value":null}"#.to_string())
+                } else if line.starts_with("GET /wda/locked ") {
+                    let count = polls_c.fetch_add(1, Ordering::AcqRel);
+                    let locked = count >= 3;
+                    (200, format!(r#"{{"value":{locked}}}"#))
+                } else {
+                    (200, r#"{"value":null}"#.to_string())
+                }
+            })
+            .await;
+            let mut client = RunnerClient::new(&base).unwrap();
+            client.lock().await.expect("delayed lock confirms");
+            assert!(polls.load(Ordering::Acquire) >= 4);
+            task.abort();
+
+            // 2. Already-locked phone confirms immediately without creating a session.
+            let sessions = Arc::new(AtomicUsize::new(0));
+            let locks = Arc::new(AtomicUsize::new(0));
+            let sessions_c = sessions.clone();
+            let locks_c = locks.clone();
+            let (base, task) = spawn_mock(move |line| {
+                if line.starts_with("POST /session ") {
+                    sessions_c.fetch_add(1, Ordering::Relaxed);
+                    (500, r#"{"value":{"error":"session_blocked_while_locked"}}"#.to_string())
+                } else if line.contains("/wda/lock ") && line.starts_with("POST ") {
+                    locks_c.fetch_add(1, Ordering::Relaxed);
+                    (500, r#"{"value":{"error":"unexpected_lock"}}"#.to_string())
+                } else if line.starts_with("GET /wda/locked ") {
+                    (200, r#"{"value":true}"#.to_string())
+                } else {
+                    (200, r#"{"value":null}"#.to_string())
+                }
+            })
+            .await;
+            let mut client = RunnerClient::new(&base).unwrap();
+            client.lock().await.expect("already locked succeeds");
+            assert_eq!(sessions.load(Ordering::Relaxed), 0);
+            assert_eq!(locks.load(Ordering::Relaxed), 0);
+            task.abort();
+
+            // 3. Persistent false fails within the bounded deadline.
+            let (base, task) = spawn_mock(move |line| {
+                if line.starts_with("POST /session ") {
+                    (200, r#"{"value":{"sessionId":"S1"}}"#.to_string())
+                } else if line.starts_with("POST /session/S1/wda/lock ") {
+                    (200, r#"{"value":null}"#.to_string())
+                } else if line.starts_with("GET /wda/locked ") {
+                    (200, r#"{"value":false}"#.to_string())
+                } else {
+                    (200, r#"{"value":null}"#.to_string())
+                }
+            })
+            .await;
+            let mut client = RunnerClient::new(&base).unwrap();
+            let started = std::time::Instant::now();
+            let err = client.lock().await.unwrap_err();
+            assert!(
+                err.to_string().contains("did not report locked"),
+                "unexpected error: {err:#}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "exceeded lock deadline: {:?}",
+                started.elapsed()
+            );
+            task.abort();
+
+            // 4. Failed lock-status reads after POST wda/lock fail as unconfirmed.
+            let post_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let post_sent_c = post_sent.clone();
+            let (base, task) = spawn_mock(move |line| {
+                if line.starts_with("POST /session ") {
+                    (200, r#"{"value":{"sessionId":"S1"}}"#.to_string())
+                } else if line.starts_with("POST /session/S1/wda/lock ") {
+                    post_sent_c.store(true, Ordering::Release);
+                    (200, r#"{"value":null}"#.to_string())
+                } else if line.starts_with("GET /wda/locked ") {
+                    if post_sent_c.load(Ordering::Acquire) {
+                        (500, r#"{"value":{"error":"read_failed"}}"#.to_string())
+                    } else {
+                        (200, r#"{"value":false}"#.to_string())
+                    }
+                } else {
+                    (200, r#"{"value":null}"#.to_string())
+                }
+            })
+            .await;
+            let mut client = RunnerClient::new(&base).unwrap();
+            let err = client.lock().await.unwrap_err();
+            assert!(
+                err.to_string().contains("lock confirmation failed"),
+                "unexpected error: {err:#}"
+            );
+            task.abort();
+
+            // 5. Confirmed lock clears `last_actionable`, so a later busy-main
+            // probe with an unreadable lock state never restores `actionable: true`.
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let busy_unreadable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let locked_c = locked.clone();
+            let busy_c = busy_unreadable.clone();
+            let (base, task) = spawn_mock(move |line| {
+                if line.starts_with("GET /status ") {
+                    if busy_c.load(Ordering::Acquire) {
+                        (
+                            200,
+                            r#"{"value":{"ready":true,"busy":true,"busyMs":5000}}"#.to_string(),
+                        )
+                    } else {
+                        (200, r#"{"value":{"ready":true}}"#.to_string())
+                    }
+                } else if line.starts_with("POST /session ") {
+                    (200, r#"{"value":{"sessionId":"S1"}}"#.to_string())
+                } else if line.starts_with("POST /session/S1/wda/lock ") {
+                    locked_c.store(true, Ordering::Release);
+                    (200, r#"{"value":null}"#.to_string())
+                } else if line.contains("/wda/locked") {
+                    if busy_c.load(Ordering::Acquire) {
+                        (500, r#"{"value":{"error":"unavailable"}}"#.to_string())
+                    } else {
+                        let is_locked = locked_c.load(Ordering::Acquire);
+                        (200, format!(r#"{{"value":{is_locked}}}"#))
+                    }
+                } else if line.contains("/wda/apps/list") {
+                    (200, r#"{"value":[{"bundleId":"com.apple.springboard","pid":1}]}"#.to_string())
+                } else {
+                    (200, r#"{"value":null}"#.to_string())
+                }
+            })
+            .await;
+            let mut client = RunnerClient::new(&base).unwrap();
+            let (before_health, _) = client.probe_health_detailed().await;
+            assert!(before_health.actionable);
+            client.lock().await.expect("lock confirms");
+            busy_unreadable.store(true, Ordering::Release);
+            let (after_health, _) = client.probe_health_detailed().await;
+            assert!(after_health.up);
+            assert!(!after_health.actionable);
+            assert_eq!(after_health.locked, None);
+            task.abort();
+
+            // 6. Unconfirmed lock (POST accepted, confirmation times out) also
+            // clears `last_actionable`, so a later busy-main probe with an
+            // unreadable lock state cannot report `actionable: true`.
+            let busy_unconfirmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let busy_u = busy_unconfirmed.clone();
+            let (base, task) = spawn_mock(move |line| {
+                if line.starts_with("GET /status ") {
+                    if busy_u.load(Ordering::Acquire) {
+                        (
+                            200,
+                            r#"{"value":{"ready":true,"busy":true,"busyMs":5000}}"#.to_string(),
+                        )
+                    } else {
+                        (200, r#"{"value":{"ready":true}}"#.to_string())
+                    }
+                } else if line.starts_with("POST /session ") {
+                    (200, r#"{"value":{"sessionId":"S1"}}"#.to_string())
+                } else if line.starts_with("POST /session/S1/wda/lock ") {
+                    (200, r#"{"value":null}"#.to_string())
+                } else if line.contains("/wda/locked") {
+                    if busy_u.load(Ordering::Acquire) {
+                        (500, r#"{"value":{"error":"unavailable"}}"#.to_string())
+                    } else {
+                        (200, r#"{"value":false}"#.to_string())
+                    }
+                } else if line.contains("/wda/apps/list") {
+                    (200, r#"{"value":[{"bundleId":"com.apple.springboard","pid":1}]}"#.to_string())
+                } else {
+                    (200, r#"{"value":null}"#.to_string())
+                }
+            })
+            .await;
+            let mut client = RunnerClient::new(&base).unwrap();
+            let (before_health, _) = client.probe_health_detailed().await;
+            assert!(before_health.actionable);
+            assert!(client.lock().await.is_err());
+            busy_unconfirmed.store(true, Ordering::Release);
+            let (after_health, _) = client.probe_health_detailed().await;
+            assert!(after_health.up);
+            assert!(!after_health.actionable);
+            assert_eq!(after_health.locked, None);
+            task.abort();
+        });
     }
 }
