@@ -112,10 +112,10 @@ impl Drop for ScriptedDaemon {
 
 /// The binary under test, built alongside this integration test.
 fn binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().expect("test binary path");
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("iphone-use-mcp");
+    // Cargo builds the binary for integration tests and names its path here;
+    // guessing it from the test executable's location broke when Cargo 1.100
+    // moved test executables into a separate build directory.
+    let path = std::path::PathBuf::from(env!("CARGO_BIN_EXE_iphone-use-mcp"));
     assert!(path.exists(), "built binary missing at {}", path.display());
     path
 }
