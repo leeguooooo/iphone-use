@@ -178,6 +178,9 @@ pub struct RunnerTransitionToken {
 #[derive(Debug)]
 pub struct RunnerLifecycle {
     state: std::sync::atomic::AtomicU64,
+    /// Lifecycle generation whose authorized reconnect armed bring-up unlock
+    /// (`0` when none). Only matching-generation completions may consume it.
+    bringup_unlock_generation: std::sync::atomic::AtomicU64,
     /// Serialises phase changes with evidence published under a token.
     ///
     /// Checking ownership and then writing shared health is a TOCTOU: the
@@ -194,6 +197,7 @@ impl RunnerLifecycle {
     pub fn new() -> Self {
         Self {
             state: std::sync::atomic::AtomicU64::new(RunnerLifecycleTransition::Active as u64),
+            bringup_unlock_generation: std::sync::atomic::AtomicU64::new(0),
             gate: Mutex::new(()),
         }
     }
@@ -223,9 +227,53 @@ impl RunnerLifecycle {
         Self::decode(self.state.load(std::sync::atomic::Ordering::Acquire)).1
     }
 
+    fn state_snapshot(&self) -> (u64, RunnerLifecycleTransition) {
+        Self::decode(self.state.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     fn active_stamp(&self) -> Option<u64> {
         let state = self.state.load(std::sync::atomic::Ordering::Acquire);
         (Self::decode(state).1 == RunnerLifecycleTransition::Active).then_some(state)
+    }
+
+    fn matches_active_stamp(&self, stamp: Option<u64>) -> bool {
+        let Some(stamp) = stamp else {
+            return false;
+        };
+        let (_, phase) = Self::decode(stamp);
+        phase == RunnerLifecycleTransition::Active
+            && self.state.load(std::sync::atomic::Ordering::Acquire) == stamp
+    }
+
+    fn is_same_non_releasing_generation(&self, generation: u64) -> bool {
+        let (cur_generation, phase) = self.state_snapshot();
+        cur_generation == generation && phase != RunnerLifecycleTransition::Releasing
+    }
+
+    fn has_bringup_unlock(&self, generation: u64) -> bool {
+        generation != 0
+            && self
+                .bringup_unlock_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                == generation
+    }
+
+    fn clear_bringup_unlock_for_generation(&self, generation: u64) {
+        if generation != 0 {
+            let _ = self.bringup_unlock_generation.compare_exchange(
+                generation,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
+        }
+    }
+
+    #[allow(dead_code)]
+    fn clear_bringup_unlock_for_stamp(&self, stamp: Option<u64>) {
+        if let Some(stamp) = stamp {
+            self.clear_bringup_unlock_for_generation(Self::decode(stamp).0);
+        }
     }
 
     fn try_begin(&self, transition: RunnerLifecycleTransition) -> Option<RunnerTransitionToken> {
@@ -305,9 +353,22 @@ impl RunnerLifecycle {
         self.publish_if_current(RunnerTransitionToken {generation,phase}, publish)
     }
 
+    fn publish_if_active_generation<R>(&self, generation: u64, publish: impl FnOnce() -> R) -> Option<R> {
+        self.publish_if_current(
+            RunnerTransitionToken {
+                generation,
+                phase: RunnerLifecycleTransition::Active,
+            },
+            publish,
+        )
+    }
+
     fn try_begin_releasing(&self) -> Option<RunnerTransitionToken> {
         let _gate = recover(self.gate.lock());
-        self.try_begin(RunnerLifecycleTransition::Releasing)
+        let token = self.try_begin(RunnerLifecycleTransition::Releasing)?;
+        self.bringup_unlock_generation
+            .store(0, std::sync::atomic::Ordering::Release);
+        Some(token)
     }
 
     fn finish_releasing(&self, token: RunnerTransitionToken) -> bool {
@@ -318,7 +379,10 @@ impl RunnerLifecycle {
 
     fn try_begin_reconnecting(&self) -> Option<RunnerTransitionToken> {
         let _gate = recover(self.gate.lock());
-        self.try_begin(RunnerLifecycleTransition::Reconnecting)
+        let token = self.try_begin(RunnerLifecycleTransition::Reconnecting)?;
+        self.bringup_unlock_generation
+            .store(token.generation, std::sync::atomic::Ordering::Release);
+        Some(token)
     }
 
     fn finish_reconnecting(&self, token: RunnerTransitionToken) -> bool {
@@ -2316,6 +2380,65 @@ fn target_not_configured_response() -> Response {
     )
 }
 
+fn can_auto_unlock(report: &crate::runner::KeepAwakeReport) -> bool {
+    report.locked == Some(true) && report.passcode == Some(false)
+}
+
+async fn try_unlock_on_bringup(
+    client: &mut crate::runner::RunnerClient,
+    context: &str,
+    permit: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Option<(crate::runner::RunnerHealth, Option<String>)> {
+    if !permit() {
+        return None;
+    }
+    let endpoint = client.keep_awake_endpoint();
+    let report = tokio::time::timeout(std::time::Duration::from_secs(3), endpoint.read())
+        .await
+        .ok()?
+        .ok()?;
+    if report.locked.is_some() || report.passcode.is_some() || report.auto_lock.is_some() {
+        crate::lock_readiness::note_runner_report(&report);
+    }
+    if !can_auto_unlock(&report) || !permit() {
+        return None;
+    }
+    match crate::timing::with_control_permit(
+        permit.clone(),
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.unlock()),
+    )
+    .await
+    {
+        Err(_) => None,
+        Ok(Ok(Ok(()))) => {
+            if !permit() {
+                return None;
+            }
+            tracing::info!(
+                "{context}: the phone was locked (no passcode); unlocked it on runner bring-up"
+            );
+            let (health, error) = handoff_probe(client).await;
+            if !permit() {
+                return None;
+            }
+            if health.up && health.locked == Some(false) {
+                crate::keep_awake::note_unlocked();
+            }
+            Some((health, error))
+        }
+        Ok(Ok(Err(unlock_error))) => {
+            tracing::info!(
+                "{context}: the phone is locked without a passcode, but unlock failed: {unlock_error:#}"
+            );
+            None
+        }
+        Ok(Err(_)) => {
+            tracing::info!("{context}: unlocking the phone timed out");
+            None
+        }
+    }
+}
+
 /// Return cached runner health and, when idle, start one background refresh.
 ///
 /// A cold runner session can legitimately take longer than the old 1.5-second
@@ -2329,6 +2452,9 @@ async fn cached_runner_health(state: &AppState) -> crate::runner::RunnerHealth {
     let cached = *recover(state.runner_health.lock());
     let Some(runner) = &state.runner else {
         return crate::runner::RunnerHealth::down();
+    };
+    let Some(active_stamp) = state.runner_lifecycle.active_stamp() else {
+        return cached;
     };
     let mut probe_slot = recover(state.runner_health_probe.lock());
     if probe_slot
@@ -2352,15 +2478,41 @@ async fn cached_runner_health(state: &AppState) -> crate::runner::RunnerHealth {
     let released = state.released.clone();
     let death = state.runner_death.clone();
     let read_degraded = state.runner_read_degraded.clone();
-    let releasing = state.runner_lifecycle.is_releasing();
+    let lifecycle = state.runner_lifecycle.clone();
+    let control_pending = state.runner_control_pending.clone();
     *probe_slot = Some(tokio::spawn(async move {
         let Ok(mut client) = runner.try_lock() else {
             return;
         };
         match tokio::time::timeout(std::time::Duration::from_secs(15), client.probe_health()).await
         {
-            Ok(health) => {
+            Ok(mut health) => {
                 use std::sync::atomic::Ordering;
+                let active_generation = RunnerLifecycle::decode(active_stamp).0;
+                let mut consume_bringup = false;
+                if lifecycle.has_bringup_unlock(active_generation)
+                    && health.up
+                    && health.locked == Some(true)
+                    && lifecycle.matches_active_stamp(Some(active_stamp))
+                    && !human_handoff_active()
+                    && control_pending.load(Ordering::Acquire) == 0
+                {
+                    let permit_lifecycle = lifecycle.clone();
+                    let permit_pending = control_pending.clone();
+                    let permit: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+                        permit_lifecycle.matches_active_stamp(Some(active_stamp))
+                            && !human_handoff_active()
+                            && permit_pending.load(Ordering::Acquire) == 0
+                    });
+                    if let Some((unlocked_health, _)) =
+                        try_unlock_on_bringup(&mut client, "runner health poll", permit).await
+                    {
+                        health = unlocked_health;
+                    }
+                    consume_bringup = true;
+                } else if health.up && health.locked == Some(false) {
+                    consume_bringup = true;
+                }
                 let degraded = read_degraded.load(Ordering::Acquire);
                 // Only a runner that otherwise looks fine needs the read: if it
                 // is down or not actionable, that already keeps it undrivable.
@@ -2377,27 +2529,34 @@ async fn cached_runner_health(state: &AppState) -> crate::runner::RunnerHealth {
                     None
                 };
                 let (health, still) = gate_on_read_path(health, degraded, read_ok);
-                if degraded && !still {
-                    tracing::info!("screen reads work again; the device runner is drivable");
-                }
-                read_degraded.store(still, Ordering::Release);
-                apply_runner_health_probe_tracked(
-                    &health_cache,
-                    &actionable,
-                    &released,
-                    releasing,
-                    Some(&death),
-                    health,
-                );
+                let _ = lifecycle.publish_if_active_stamp(Some(active_stamp), || {
+                    if consume_bringup {
+                        lifecycle.clear_bringup_unlock_for_generation(active_generation);
+                    }
+                    if degraded && !still {
+                        tracing::info!("screen reads work again; the device runner is drivable");
+                    }
+                    read_degraded.store(still, Ordering::Release);
+                    apply_runner_health_probe_tracked(
+                        &health_cache,
+                        &actionable,
+                        &released,
+                        false,
+                        Some(&death),
+                        health,
+                    );
+                });
             }
             Err(_) => {
                 // A timeout does not prove the runner is down or locked, but
                 // old actionability is no longer evidence that inputs work.
                 // Do not release or restart it; the next completed probe can
                 // restore readiness (#313).
-                recover(health_cache.lock()).actionable = false;
-                actionable.store(false, std::sync::atomic::Ordering::Release);
-                tracing::warn!("runner health probe timed out; actionability is unverified");
+                let _ = lifecycle.publish_if_active_stamp(Some(active_stamp), || {
+                    recover(health_cache.lock()).actionable = false;
+                    actionable.store(false, std::sync::atomic::Ordering::Release);
+                    tracing::warn!("runner health probe timed out; actionability is unverified");
+                });
             }
         }
     }));
@@ -2671,6 +2830,95 @@ impl Drop for RunnerReadinessOwnership {
     }
 }
 
+enum ReadinessUnlockResult {
+    NotUnlocked,
+    Unlocked(Option<crate::runner::RunnerHealth>),
+}
+
+async fn try_unlock_during_readiness(
+    state: &Arc<AppState>,
+    token: RunnerTransitionToken,
+    runner: &Arc<tokio::sync::Mutex<crate::runner::RunnerClient>>,
+    deadline: tokio::time::Instant,
+    probe_budget: std::time::Duration,
+) -> ReadinessUnlockResult {
+    if !state.runner_lifecycle.owns(token)
+        || human_handoff_active()
+        || tokio::time::Instant::now() >= deadline
+    {
+        return ReadinessUnlockResult::NotUnlocked;
+    }
+    let keep_awake_deadline = deadline.min(tokio::time::Instant::now() + probe_budget);
+    let endpoint = {
+        let Ok(client) = tokio::time::timeout_at(keep_awake_deadline, runner.lock()).await else {
+            return ReadinessUnlockResult::NotUnlocked;
+        };
+        client.keep_awake_endpoint()
+    };
+    let report = match tokio::time::timeout_at(keep_awake_deadline, endpoint.read()).await {
+        Ok(Ok(report)) => report,
+        _ => return ReadinessUnlockResult::NotUnlocked,
+    };
+    if report.locked.is_some() || report.passcode.is_some() || report.auto_lock.is_some() {
+        crate::lock_readiness::note_runner_report(&report);
+    }
+    if !can_auto_unlock(&report) {
+        return ReadinessUnlockResult::NotUnlocked;
+    }
+    if !state.runner_lifecycle.owns(token)
+        || human_handoff_active()
+        || tokio::time::Instant::now() >= deadline
+    {
+        return ReadinessUnlockResult::NotUnlocked;
+    }
+    let _priority = state.begin_runner_control();
+    let unlock_deadline =
+        deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
+    let mut client = match tokio::time::timeout_at(unlock_deadline, runner.lock()).await {
+        Ok(client) => client,
+        Err(_) => return ReadinessUnlockResult::NotUnlocked,
+    };
+    let permit_lifecycle = state.runner_lifecycle.clone();
+    let permit: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+        permit_lifecycle.owns(token)
+            && !human_handoff_active()
+            && tokio::time::Instant::now() < deadline
+    });
+    if !permit() {
+        return ReadinessUnlockResult::NotUnlocked;
+    }
+    match crate::timing::with_control_permit(
+        permit.clone(),
+        tokio::time::timeout_at(unlock_deadline, client.unlock()),
+    )
+    .await
+    {
+        Err(_) => return ReadinessUnlockResult::NotUnlocked,
+        Ok(Ok(Ok(()))) => {
+            tracing::info!("managed runner is up and the phone was locked (no passcode); unlocked it during reconnect");
+        }
+        Ok(Ok(Err(error))) => {
+            tracing::info!(
+                "managed runner is up and the phone is locked without a passcode, but unlock failed: {error:#}"
+            );
+            return ReadinessUnlockResult::NotUnlocked;
+        }
+        Ok(Err(_)) => {
+            tracing::info!("unlocking the phone during reconnect timed out");
+            return ReadinessUnlockResult::NotUnlocked;
+        }
+    }
+    if !state.runner_lifecycle.owns(token) || tokio::time::Instant::now() >= deadline {
+        return ReadinessUnlockResult::Unlocked(None);
+    }
+    let reprobe_deadline = deadline.min(tokio::time::Instant::now() + probe_budget);
+    let health = tokio::time::timeout_at(reprobe_deadline, client.probe_health_detailed())
+        .await
+        .ok()
+        .map(|(health, _)| health);
+    ReadinessUnlockResult::Unlocked(health)
+}
+
 /// Drive one readiness wait to an outcome. Contains no lifecycle bookkeeping
 /// so it can be awaited directly by tests with a short budget.
 async fn run_runner_readiness_wait(
@@ -2693,6 +2941,7 @@ async fn run_runner_readiness_wait(
         "managed runner readiness wait started"
     );
     let mut seen_up = false;
+    let mut unlock_attempted = false;
     let mut setup_blocker = String::new();
     // Why the last probe failed, so a reconnect that runs out of time says
     // what it kept hitting instead of only that it did not finish.
@@ -2768,11 +3017,79 @@ async fn run_runner_readiness_wait(
                     Some(false) => {}
                 }
                 if health.up && health.locked == Some(true) {
-                    // runner is up and only the lock screen stands between it and
-                    // actions. That is the user's to clear, not the daemon's,
-                    // so the reconnect is complete: end the lifecycle now
-                    // instead of hiding the "unlock" hint behind
-                    // `reconnecting` for the rest of the budget.
+                    if !unlock_attempted {
+                        unlock_attempted = true;
+                        match try_unlock_during_readiness(
+                            state,
+                            token,
+                            runner,
+                            deadline,
+                            budget.probe,
+                        )
+                        .await
+                        {
+                            ReadinessUnlockResult::Unlocked(Some(unlocked_health)) => {
+                                if tokio::time::Instant::now() >= deadline {
+                                    break RunnerReadinessOutcome::Deadline;
+                                }
+                                let published = state.runner_lifecycle.publish_if_current(token, || {
+                                    apply_runner_health_probe(
+                                        &state.runner_health,
+                                        &state.runner_actionable,
+                                        &state.released,
+                                        unlocked_health,
+                                    )
+                                });
+                                match published {
+                                    None => break RunnerReadinessOutcome::Superseded,
+                                    Some(true) => {
+                                        crate::keep_awake::note_unlocked();
+                                        state
+                                            .runner_lifecycle
+                                            .clear_bringup_unlock_for_generation(token.generation);
+                                        break RunnerReadinessOutcome::Ready;
+                                    }
+                                    Some(false)
+                                        if unlocked_health.up
+                                            && unlocked_health.locked == Some(true) =>
+                                    {
+                                        state
+                                            .runner_lifecycle
+                                            .clear_bringup_unlock_for_generation(token.generation);
+                                        break RunnerReadinessOutcome::Locked;
+                                    }
+                                    Some(false) => {
+                                        if unlocked_health.locked == Some(false) {
+                                            crate::keep_awake::note_unlocked();
+                                        }
+                                        let remaining = deadline
+                                            .saturating_duration_since(tokio::time::Instant::now());
+                                        if remaining.is_zero() {
+                                            break RunnerReadinessOutcome::Deadline;
+                                        }
+                                        tokio::time::sleep(budget.poll.min(remaining)).await;
+                                        continue;
+                                    }
+                                }
+                            }
+                            ReadinessUnlockResult::Unlocked(None) => {
+                                if !state.runner_lifecycle.owns(token) {
+                                    break RunnerReadinessOutcome::Superseded;
+                                }
+                                let remaining =
+                                    deadline.saturating_duration_since(tokio::time::Instant::now());
+                                if remaining.is_zero() {
+                                    break RunnerReadinessOutcome::Deadline;
+                                }
+                                tokio::time::sleep(budget.poll.min(remaining)).await;
+                                continue;
+                            }
+                            ReadinessUnlockResult::NotUnlocked => {}
+                        }
+                    }
+                    state
+                        .runner_lifecycle
+                        .clear_bringup_unlock_for_generation(token.generation);
                     break RunnerReadinessOutcome::Locked;
                 }
             }
@@ -2785,6 +3102,9 @@ async fn run_runner_readiness_wait(
     };
     match outcome {
         RunnerReadinessOutcome::Ready => {
+            state
+                .runner_lifecycle
+                .clear_bringup_unlock_for_generation(token.generation);
             state.touch_activity();
             tracing::info!(
                 elapsed_secs = started.elapsed().as_secs(),
@@ -6524,6 +6844,17 @@ async fn agent_runner_handoff(State(state): State<Arc<AppState>>, headers: Heade
             serde_json::json!({"ok": false, "error": "client_busy"}),
         );
     };
+    let was_released = state.released.load(std::sync::atomic::Ordering::Acquire);
+    let (generation_before, lifecycle_before) = state.runner_lifecycle.state_snapshot();
+    let bringup_pending = state.runner_lifecycle.has_bringup_unlock(generation_before);
+    let caller_owner = named_owner(&headers).map(str::to_string);
+    let (owner_before, _, owner_epoch_before) = owner_status_versioned(&state);
+    let is_genuine_bringup = bringup_pending
+        || was_released
+        || lifecycle_before == RunnerLifecycleTransition::Reconnecting;
+    let owner_allows_unlock =
+        owner_before.is_none() || owner_before.as_deref() == caller_owner.as_deref();
+
     client.forget_runner();
     state
         .runner_read_degraded
@@ -6546,18 +6877,87 @@ async fn agent_runner_handoff(State(state): State<Arc<AppState>>, headers: Heade
             );
         }
     }
-    drop(client);
-    let lifecycle = state.runner_lifecycle.current();
-    if lifecycle == RunnerLifecycleTransition::Active {
-        apply_runner_health_probe_tracked(
-            &state.runner_health,
-            &state.runner_actionable,
-            &state.released,
-            false,
-            Some(&state.runner_death),
-            health,
-        );
+    let live_bringup_authority = |state: &AppState| -> bool {
+        state.released.load(std::sync::atomic::Ordering::Acquire)
+            || state.runner_lifecycle.current() == RunnerLifecycleTransition::Reconnecting
+            || state
+                .runner_lifecycle
+                .has_bringup_unlock(generation_before)
+    };
+    let mut consume_bringup = false;
+    if is_genuine_bringup
+        && live_bringup_authority(&state)
+        && owner_allows_unlock
+        && lifecycle_before != RunnerLifecycleTransition::Releasing
+        && health.up
+        && health.locked == Some(true)
+        && !human_handoff_active()
+        && state
+            .runner_lifecycle
+            .is_same_non_releasing_generation(generation_before)
+    {
+        let weak_state = Arc::downgrade(&state);
+        let caller = caller_owner.clone();
+        let permit: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+            let Some(state) = weak_state.upgrade() else {
+                return false;
+            };
+            if human_handoff_active()
+                || !state
+                    .runner_lifecycle
+                    .is_same_non_releasing_generation(generation_before)
+                || !(state.released.load(std::sync::atomic::Ordering::Acquire)
+                    || state.runner_lifecycle.current() == RunnerLifecycleTransition::Reconnecting
+                    || state
+                        .runner_lifecycle
+                        .has_bringup_unlock(generation_before))
+            {
+                return false;
+            }
+            let (cur_owner, _, cur_epoch) = owner_status_versioned(&state);
+            cur_epoch == owner_epoch_before
+                && (cur_owner.is_none() || cur_owner.as_deref() == caller.as_deref())
+        });
+        if let Some((unlocked_health, unlocked_error)) =
+            try_unlock_on_bringup(&mut client, "runner handoff", permit).await
+        {
+            health = unlocked_health;
+            error = unlocked_error;
+        }
+        consume_bringup = true;
+    } else if health.up && health.locked == Some(false) {
+        consume_bringup = true;
     }
+    if consume_bringup
+        && state
+            .runner_lifecycle
+            .is_same_non_releasing_generation(generation_before)
+    {
+        state
+            .runner_lifecycle
+            .clear_bringup_unlock_for_generation(generation_before);
+    }
+    let lifecycle = state.runner_lifecycle.current();
+    if lifecycle_before != RunnerLifecycleTransition::Releasing {
+        let _ = state
+            .runner_lifecycle
+            .publish_if_active_generation(generation_before, || {
+                if consume_bringup {
+                    state
+                        .runner_lifecycle
+                        .clear_bringup_unlock_for_generation(generation_before);
+                }
+                apply_runner_health_probe_tracked(
+                    &state.runner_health,
+                    &state.runner_actionable,
+                    &state.released,
+                    false,
+                    Some(&state.runner_death),
+                    health,
+                );
+            });
+    }
+    drop(client);
     let lifecycle = match lifecycle {
         RunnerLifecycleTransition::Active => "active",
         RunnerLifecycleTransition::Releasing => "releasing",
@@ -12410,7 +12810,7 @@ async fn guard_foreground(
 /// endpoint used to answer `device_not_drivable` and leave it released).
 /// Whether an action should first try to open a locked phone: the last
 /// observation says it is locked, and nothing says a passcode guards it.
-fn should_unlock_before_action(
+fn should_probe_unlock_before_action(
     cached_locked: Option<bool>,
     report: crate::keep_awake::LockReport,
 ) -> bool {
@@ -12439,15 +12839,48 @@ async fn unlock_before_action(
             && weak.upgrade().is_some_and(|state| original.current(&state)));
     if !allowed() { return Err(crate::timing::ControlInterruption {mutations_admitted:false}); }
     let cached = recover(state.runner_health.lock()).locked;
-    if !should_unlock_before_action(cached, crate::keep_awake::lock_report()) { return Ok(()); }
+    if !should_probe_unlock_before_action(cached, crate::keep_awake::lock_report()) { return Ok(()); }
     let budget = deadline.saturating_duration_since(tokio::time::Instant::now())
         .saturating_sub(std::time::Duration::from_secs(6))
         .min(std::time::Duration::from_secs(5));
     if budget.is_zero() {
         return if allowed() {Ok(())} else {Err(crate::timing::ControlInterruption {mutations_admitted:false})};
     }
+    let unlock_deadline = tokio::time::Instant::now() + budget;
+    let endpoint = client.keep_awake_endpoint();
+    let report = match tokio::time::timeout_at(unlock_deadline, endpoint.read()).await {
+        Ok(Ok(report)) => report,
+        _ => {
+            return if allowed() {
+                Ok(())
+            } else {
+                Err(crate::timing::ControlInterruption { mutations_admitted: false })
+            };
+        }
+    };
+    if report.locked.is_some() || report.passcode.is_some() || report.auto_lock.is_some() {
+        crate::lock_readiness::note_runner_report(&report);
+    }
+    if !can_auto_unlock(&report) {
+        return if allowed() {
+            Ok(())
+        } else {
+            Err(crate::timing::ControlInterruption { mutations_admitted: false })
+        };
+    }
+    if !allowed() {
+        return Err(crate::timing::ControlInterruption { mutations_admitted: false });
+    }
+    let remaining = unlock_deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return if allowed() {
+            Ok(())
+        } else {
+            Err(crate::timing::ControlInterruption { mutations_admitted: false })
+        };
+    }
     let result = crate::timing::with_control_permit(allowed.clone(),
-        tokio::time::timeout(budget, client.unlock())).await;
+        tokio::time::timeout(remaining, client.unlock())).await;
     match result {
         Err(interrupted) => return Err(interrupted),
         Ok(Ok(Ok(()))) => {
@@ -14046,45 +14479,71 @@ async fn agent_actions_scoped(
 
         match step {
             AgentActionStep::Action { action, after_ms } => {
-                if let Err(refusal) = scoped_observation(&state, &capture_scope, guard_foreground(&mut w, action)).await {
-                    let mut body = agent_actions_failure_body(
-                        index,
-                        completed,
-                        applied_actions,
-                        refusal.error(),
-                        "not_sent",
-                        applied_actions == 0
-                            && matches!(refusal, crate::guard::Refusal::ForegroundUnknown),
-                        &step_results,
-                        None,
-                    );
-                    if let (Some(body), serde_json::Value::Object(extra)) =
-                        (body.as_object_mut(), refusal.to_json())
-                    {
-                        for key in ["hint", "app"] {
-                            if let Some(value) = extra.get(key) {
-                                body.insert(key.to_string(), value.clone());
-                            }
-                        }
-                    }
-                    return agent_actions_json(StatusCode::FORBIDDEN, body);
-                }
                 // Dispatch exactly once. If the batch deadline wins after this
                 // point, the action outcome is unknown and the whole batch must
                 // not be replayed automatically.
                 let post_mark = w.last_post();
                 let mut step_detail = None;
+                let mut guard_blocked: Option<crate::guard::Refusal> = None;
                 let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < batch_deadline;
                 let outcome = match tokio::time::timeout_at(
                     batch_deadline,
-                    scoped_runner_action(&state, &capture_scope, batch_deadline, direct_agent_action(
-                        &mut w,
-                        &state.runner_actionable,
-                        action,
-                        &mut step_detail,
-                        batch_deadline,
-                        Some(&dispatch_allowed),
-                    capture_scope.text_scope(named_owner(&headers)).as_ref(), )),
+                    scoped_runner_action(&state, &capture_scope, batch_deadline, async {
+                        if !is_capture_or_volume(action) && !is_input_continuation(action) {
+                            if let Err(interrupted) = unlock_before_action(
+                                &state,
+                                &mut w,
+                                batch_deadline,
+                                &capture_scope,
+                            )
+                            .await
+                            {
+                                return control_interruption_outcome(interrupted);
+                            }
+                        }
+                        if let Err(refusal) =
+                            scoped_observation(&state, &capture_scope, guard_foreground(&mut w, action)).await
+                        {
+                            if capture_scope.current(&state) {
+                                guard_blocked = Some(refusal);
+                            }
+                            return if w.last_post() != post_mark {
+                                RunnerControlOutcome::ScopeInterrupted
+                            } else {
+                                RunnerControlOutcome::Refused("guard_refused", "")
+                            };
+                        }
+                        if !capture_scope.current(&state) {
+                            return if w.last_post() != post_mark {
+                                RunnerControlOutcome::ScopeInterrupted
+                            } else {
+                                control_interruption_outcome(crate::timing::ControlInterruption {
+                                    mutations_admitted: false,
+                                })
+                            };
+                        }
+                        let outcome = direct_agent_action(
+                            &mut w,
+                            &state.runner_actionable,
+                            action,
+                            &mut step_detail,
+                            batch_deadline,
+                            Some(&dispatch_allowed),
+                            capture_scope.text_scope(named_owner(&headers)).as_ref(),
+                        )
+                        .await;
+                        if outcome == RunnerControlOutcome::NotSent && !capture_scope.current(&state)
+                        {
+                            return if w.last_post() != post_mark {
+                                RunnerControlOutcome::ScopeInterrupted
+                            } else {
+                                control_interruption_outcome(crate::timing::ControlInterruption {
+                                    mutations_admitted: false,
+                                })
+                            };
+                        }
+                        outcome
+                    }),
                 )
                 .await
                 {
@@ -14117,6 +14576,30 @@ async fn agent_actions_scoped(
                         ), step_detail.as_ref()).await;
                     }
                 };
+                if let Some(refusal) = guard_blocked {
+                    let mut body = agent_actions_failure_body(
+                        index,
+                        completed,
+                        applied_actions,
+                        refusal.error(),
+                        "not_sent",
+                        applied_actions == 0
+                            && w.last_post() == post_mark
+                            && matches!(refusal, crate::guard::Refusal::ForegroundUnknown),
+                        &step_results,
+                        None,
+                    );
+                    if let (Some(body), serde_json::Value::Object(extra)) =
+                        (body.as_object_mut(), refusal.to_json())
+                    {
+                        for key in ["hint", "app"] {
+                            if let Some(value) = extra.get(key) {
+                                body.insert(key.to_string(), value.clone());
+                            }
+                        }
+                    }
+                    return agent_actions_json(StatusCode::FORBIDDEN, body);
+                }
                 // An optional alert step ({"if_present":true}) that found no
                 // alert is a pass: occasional system prompts ("Allow Paste")
                 // can be written into a flow without failing it when they do
@@ -16628,28 +17111,7 @@ async fn agent_input_inner(
     if tokio::time::Instant::now() >= agent_runner_deadline {
         return runner_deadline_response(false);
     }
-    // Owner limits (`crate::guard`), checked last so a refused action costs
-    // no budget; the foreground read happens only with a blocklist.
     let policy = crate::guard::Policy::get();
-    if policy.is_active() {
-        if policy.needs_foreground(&value) {
-            let checked = tokio::time::timeout_at(agent_runner_deadline, async {
-                let mut client = runner.lock().await;
-                guard_foreground(&mut client, &value).await
-            })
-            .await;
-            match checked {
-                Ok(Ok(())) => {}
-                Ok(Err(refusal)) => return guard_refusal(&refusal, false),
-                Err(_) => return runner_deadline_response(false),
-            }
-        }
-        if let Err(refusal) =
-            crate::guard::charge(policy, &guard_owner(&headers), 1, crate::metrics::now_ms())
-        {
-            return guard_refusal(&refusal, false);
-        }
-    }
     let dispatched = Arc::new(std::sync::Mutex::new(None::<Option<std::time::Instant>>));
     let dispatch_marker = dispatched.clone();
     let want_delta = query.return_mode.as_deref() == Some("delta");
@@ -16665,6 +17127,11 @@ async fn agent_input_inner(
     // follows gets its own, strictly shorter deadline, so a slow `/source`
     // or `/alert/text` can never turn an applied action into
     // `outcome_unknown` and can never cause the mutation to be re-sent.
+    enum SingleInputDispatch<'a> {
+        Expired,
+        Refused(Response),
+        Done(tokio::sync::MutexGuard<'a, crate::runner::RunnerClient>, RunnerControlOutcome),
+    }
     let mut detail = None;
     let dispatch = tokio::time::timeout_at(agent_runner_deadline, async {
         let mut client = runner.lock().await;
@@ -16672,31 +17139,89 @@ async fn agent_input_inner(
             || state.runner_lifecycle.is_transitioning()
             || state.released.load(std::sync::atomic::Ordering::Acquire)
         {
-            return None;
+            return SingleInputDispatch::Expired;
         }
-        *recover(dispatch_marker.lock()) = Some(client.last_post());
+        let post_mark = client.last_post();
+        *recover(dispatch_marker.lock()) = Some(post_mark);
         let dispatch_allowed = || capture_scope.current(&state) && tokio::time::Instant::now() < agent_runner_deadline;
+        let mut guard_blocked: Option<crate::guard::Refusal> = None;
         let outcome = scoped_runner_action(&state, &capture_scope, agent_runner_deadline, async {
             if !is_capture_or_volume(&value) && !is_input_continuation(&value) && !is_lock_shortcut(&value) {
                 if let Err(interrupted) = unlock_before_action(&state, &mut client, agent_runner_deadline, &capture_scope).await {
                     return control_interruption_outcome(interrupted);
                 }
             }
-            direct_agent_action(
+            // Owner limits (`crate::guard`), checked against the post-unlock screen
+            // under the same runner guard so a refused action costs no budget.
+            if policy.is_active() {
+                if policy.needs_foreground(&value) {
+                    if let Err(refusal) = scoped_observation(&state, &capture_scope, guard_foreground(&mut client, &value)).await {
+                        if capture_scope.current(&state) {
+                            guard_blocked = Some(refusal);
+                        }
+                        return if client.last_post() != post_mark {
+                            RunnerControlOutcome::ScopeInterrupted
+                        } else {
+                            RunnerControlOutcome::Refused("guard_refused", "")
+                        };
+                    }
+                }
+                if !capture_scope.current(&state) {
+                    return if client.last_post() != post_mark {
+                        RunnerControlOutcome::ScopeInterrupted
+                    } else {
+                        control_interruption_outcome(crate::timing::ControlInterruption {
+                            mutations_admitted: false,
+                        })
+                    };
+                }
+                if let Err(refusal) =
+                    crate::guard::charge(policy, &guard_owner(&headers), 1, crate::metrics::now_ms())
+                {
+                    guard_blocked = Some(refusal);
+                    return RunnerControlOutcome::Refused("guard_refused", "");
+                }
+            }
+            if !capture_scope.current(&state) {
+                return if client.last_post() != post_mark {
+                    RunnerControlOutcome::ScopeInterrupted
+                } else {
+                    control_interruption_outcome(crate::timing::ControlInterruption {
+                        mutations_admitted: false,
+                    })
+                };
+            }
+            let outcome = direct_agent_action(
                 &mut client,
                 &state.runner_actionable,
                 &value,
                 &mut detail,
                 agent_runner_deadline,
                 Some(&dispatch_allowed),
-            capture_scope.text_scope(named_owner(&headers)).as_ref(), ).await
+                capture_scope.text_scope(named_owner(&headers)).as_ref(),
+            )
+            .await;
+            if outcome == RunnerControlOutcome::NotSent && !capture_scope.current(&state) {
+                return if client.last_post() != post_mark {
+                    RunnerControlOutcome::ScopeInterrupted
+                } else {
+                    control_interruption_outcome(crate::timing::ControlInterruption {
+                        mutations_admitted: false,
+                    })
+                };
+            }
+            outcome
         }).await;
-        Some((client, outcome))
+        if let Some(refusal) = guard_blocked {
+            return SingleInputDispatch::Refused(guard_refusal(&refusal, false));
+        }
+        SingleInputDispatch::Done(client, outcome)
     })
     .await;
     let (mut client, outcome) = match dispatch {
-        Ok(Some(dispatched)) => dispatched,
-        Ok(None) => return runner_deadline_response(false),
+        Ok(SingleInputDispatch::Done(client, outcome)) => (client, outcome),
+        Ok(SingleInputDispatch::Refused(response)) => return response,
+        Ok(SingleInputDispatch::Expired) => return runner_deadline_response(false),
         Err(_) => {
             let mark = *recover(dispatched.lock());
             return with_app_lifecycle_receipt(runner_deadline_response(posted_since(runner, mark).await), detail.as_ref()).await;
@@ -28614,6 +29139,9 @@ mod tests {
             let keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let seen = keys.clone();
             let runner = MockRunner::start(move |request| {
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#.into();
+                }
                 if request.contains("/wda/unlock") {
                     slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap()
                         .released.store(true, std::sync::atomic::Ordering::Release);
@@ -28720,6 +29248,9 @@ mod tests {
             let touches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let seen = touches.clone();
             let runner = MockRunner::start(move |request| {
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#.into();
+                }
                 if request.contains("/window/size") {
                     state_slot.lock().unwrap().as_ref().unwrap().upgrade().unwrap()
                         .released.store(true,std::sync::atomic::Ordering::Release);
@@ -29458,6 +29989,761 @@ mod tests {
             assert_eq!(body["retry_safe"], false);
             assert_ne!(recover(state.runner_health.lock()).locked, Some(true));
             runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn readiness_loop_unlocks_a_locked_phone_without_a_passcode() {
+        block(async {
+            let unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let unlocked_flag = unlocked.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    unlocked_flag.store(true, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                let is_locked = !unlocked_flag.load(std::sync::atomic::Ordering::Acquire);
+                if request.contains("/wda/keepawake") {
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let status = SetupStatusFixture::absent();
+            let state = readiness_state_with_runner(runner.base());
+            state
+                .released
+                .store(true, std::sync::atomic::Ordering::Release);
+            let token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+
+            let outcome =
+                run_runner_readiness_wait(&state, token, short_budget(), status.path(), 0).await;
+
+            assert_eq!(outcome, RunnerReadinessOutcome::Ready);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+            assert!(!state.released.load(std::sync::atomic::Ordering::Acquire));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn readiness_loop_does_not_unlock_a_passcode_phone() {
+        block(async {
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":true}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let status = SetupStatusFixture::absent();
+            let state = readiness_state_with_runner(runner.base());
+            let token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+
+            let budget = short_budget();
+            let started = std::time::Instant::now();
+            let outcome = run_runner_readiness_wait(&state, token, budget, status.path(), 0).await;
+
+            assert_eq!(outcome, RunnerReadinessOutcome::Locked);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert!(started.elapsed() < budget.total);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn readiness_loop_falls_back_to_locked_when_unlock_fails() {
+        block(async {
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":{"error":"unknown error","message":"pressed Home three times but the phone is still locked"}}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let status = SetupStatusFixture::absent();
+            let state = readiness_state_with_runner(runner.base());
+            let token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+
+            let budget = short_budget();
+            let started = std::time::Instant::now();
+            let outcome = run_runner_readiness_wait(&state, token, budget, status.path(), 0).await;
+
+            assert_eq!(outcome, RunnerReadinessOutcome::Locked);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert!(started.elapsed() < budget.total);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn agent_actions_unlocks_locked_phone_once_before_dispatching_steps() {
+        block(async {
+            use tower::ServiceExt;
+            let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+            let log = events.clone();
+            let mut runner = MockRunner::start(move |request| {
+                let first_line = request.lines().next().unwrap_or_default();
+                if first_line.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#.to_string();
+                }
+                if first_line.contains("POST /wda/unlock") {
+                    log.lock().unwrap().push("unlock".to_string());
+                    return r#"{"value":null}"#.to_string();
+                }
+                if first_line.contains("/home") || first_line.contains("/wda/homescreen") || first_line.contains("/wda/pressButton") {
+                    log.lock().unwrap().push("home".to_string());
+                    return r#"{"value":null}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_state_with_runner(runner.base());
+            Arc::get_mut(&mut state).unwrap().managed_runner = false;
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                up: true,
+                actionable: true,
+                locked: Some(true),
+            };
+            state
+                .runner_actionable
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/actions")
+                        .header("x-phone-control", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"steps":[{"kind":"action","action":{"type":"shortcut","name":"home"}},{"kind":"action","action":{"type":"shortcut","name":"home"}}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            let recorded = events.lock().unwrap().clone();
+            assert_eq!(recorded, vec!["unlock", "home", "home"]);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn agent_actions_unlock_scope_revocation_prevents_dispatch() {
+        block(async {
+            use tower::ServiceExt;
+            let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+            let slot = state_slot.clone();
+            let home_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = home_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#.to_string();
+                }
+                if request.contains("POST /wda/unlock") {
+                    slot.lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .upgrade()
+                        .unwrap()
+                        .released
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/home") || request.contains("/wda/homescreen") || request.contains("/wda/pressButton") {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                healthy_runner_responder(request)
+            });
+            let mut state = readiness_state_with_runner(runner.base());
+            Arc::get_mut(&mut state).unwrap().managed_runner = false;
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                up: true,
+                actionable: true,
+                locked: Some(true),
+            };
+            state
+                .runner_actionable
+                .store(true, std::sync::atomic::Ordering::Release);
+            *state_slot.lock().unwrap() = Some(Arc::downgrade(&state));
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/actions")
+                        .header("x-phone-control", "1")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"steps":[{"kind":"action","action":{"type":"shortcut","name":"home"}}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert!(state.released.load(std::sync::atomic::Ordering::Acquire));
+            assert_eq!(home_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            let (response, body) = read_json_response(response).await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = body.unwrap();
+            assert_eq!(body["error"], "control_scope_changed");
+            assert_eq!(body["outcome"], "unknown");
+            assert_eq!(body["retry_safe"], false);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn runner_handoff_unlocks_a_locked_phone_without_a_passcode() {
+        block(async {
+            use tower::ServiceExt;
+            let unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let unlocked_flag = unlocked.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    unlocked_flag.store(true, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                let is_locked = !unlocked_flag.load(std::sync::atomic::Ordering::Acquire);
+                if request.contains("/wda/keepawake") {
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            state
+                .released
+                .store(true, std::sync::atomic::Ordering::Release);
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let (response, body) = read_json_response(response).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body.unwrap();
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["actionable"], true);
+            assert_eq!(body["locked"], false);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+            assert!(!state.released.load(std::sync::atomic::Ordering::Acquire));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn runner_handoff_does_not_unlock_a_passcode_phone() {
+        block(async {
+            use tower::ServiceExt;
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":true}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let (response, body) = read_json_response(response).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = body.unwrap();
+            assert_eq!(body["ok"], true);
+            assert_eq!(body["locked"], true);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn cached_health_unlocks_on_bringup_without_passcode_but_keeps_manual_lock() {
+        block(async {
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let locked_flag = locked.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    locked_flag.store(false, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                let is_locked = locked_flag.load(std::sync::atomic::Ordering::Acquire);
+                if request.contains("/wda/keepawake") {
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            state
+                .released
+                .store(true, std::sync::atomic::Ordering::Release);
+            let reconnect_token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+            assert!(state.runner_lifecycle.finish_reconnecting(reconnect_token));
+
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            assert!(state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+            assert!(!state.released.load(std::sync::atomic::Ordering::Acquire));
+
+            locked.store(true, std::sync::atomic::Ordering::Release);
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            assert!(!state
+                .runner_actionable
+                .load(std::sync::atomic::Ordering::Acquire));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn runner_handoff_skips_unlock_on_active_runner_and_conflicting_owner() {
+        block(async {
+            use tower::ServiceExt;
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                up: true,
+                actionable: false,
+                locked: Some(true),
+            };
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+            state
+                .released
+                .store(true, std::sync::atomic::Ordering::Release);
+            let mut owner_headers = HeaderMap::new();
+            owner_headers.insert("x-phone-owner", "owner-a".parse().unwrap());
+            claim_phone_owner(&state, &owner_headers).unwrap();
+
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .header("x-phone-owner", "owner-b")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn agent_actions_skips_unlock_when_passcode_is_set_or_unknown() {
+        block(async {
+            use tower::ServiceExt;
+            for keepawake_body in [
+                r#"{"value":{"active":false,"locked":true,"passcodeEnabled":true}}"#,
+                r#"{"value":{"active":false,"locked":true}}"#,
+            ] {
+                let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let calls_counter = unlock_calls.clone();
+                let body_str = keepawake_body.to_string();
+                let mut runner = MockRunner::start(move |request| {
+                    if request.contains("/wda/keepawake") {
+                        return body_str.clone();
+                    }
+                    if request.contains("POST /wda/unlock") {
+                        calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return r#"{"value":null}"#.to_string();
+                    }
+                    healthy_runner_responder(request)
+                });
+                let mut state = readiness_state_with_runner(runner.base());
+                Arc::get_mut(&mut state).unwrap().managed_runner = false;
+                *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                    up: true,
+                    actionable: true,
+                    locked: Some(true),
+                };
+                state
+                    .runner_actionable
+                    .store(true, std::sync::atomic::Ordering::Release);
+
+                let response = router(state.clone())
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri("/agent/actions")
+                            .header("x-phone-control", "1")
+                            .header("content-type", "application/json")
+                            .body(Body::from(
+                                r#"{"steps":[{"kind":"action","action":{"type":"shortcut","name":"home"}}]}"#,
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    unlock_calls.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "unexpected unlock for {keepawake_body}"
+                );
+                runner.shutdown();
+            }
+        });
+    }
+
+    #[test]
+    fn cached_health_does_not_unlock_or_clear_release_after_mid_probe_release() {
+        block(async {
+            let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+            let slot = state_slot.clone();
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    if let Some(state) = slot.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
+                        let token = state.runner_lifecycle.try_begin_releasing().unwrap();
+                        state.released.store(true, std::sync::atomic::Ordering::Release);
+                        assert!(state.runner_lifecycle.finish_releasing(token));
+                    }
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            *state_slot.lock().unwrap() = Some(Arc::downgrade(&state));
+            let reconnect_token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+            assert!(state.runner_lifecycle.finish_reconnecting(reconnect_token));
+
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert!(state.released.load(std::sync::atomic::Ordering::Acquire));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn cached_health_keeps_manual_lock_across_transient_probe_failure() {
+        block(async {
+            let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let locked = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let down_flag = down.clone();
+            let locked_flag = locked.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if down_flag.load(std::sync::atomic::Ordering::Acquire) {
+                    return "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+                }
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    locked_flag.store(false, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    let is_locked = locked_flag.load(std::sync::atomic::Ordering::Acquire);
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    let is_locked = locked_flag.load(std::sync::atomic::Ordering::Acquire);
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let state = readiness_state_with_runner(runner.base());
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth {
+                up: true,
+                actionable: false,
+                locked: Some(true),
+            };
+
+            down.store(true, std::sync::atomic::Ordering::Release);
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+            assert!(!recover(state.runner_health.lock()).up);
+
+            down.store(false, std::sync::atomic::Ordering::Release);
+            let _ = cached_runner_health(&state).await;
+            let probe = recover(state.runner_health_probe.lock()).take().unwrap();
+            probe.await.unwrap();
+
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn readiness_loop_continues_probing_after_unlock_ack_and_failed_reprobe() {
+        block(async {
+            let unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let fail_next_status = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let unlocked_flag = unlocked.clone();
+            let fail_flag = fail_next_status.clone();
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    unlocked_flag.store(true, std::sync::atomic::Ordering::Release);
+                    fail_flag.store(true, std::sync::atomic::Ordering::Release);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.starts_with("GET /status ")
+                    && fail_flag.swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    return "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+                }
+                let is_locked = !unlocked_flag.load(std::sync::atomic::Ordering::Acquire);
+                if request.contains("/wda/keepawake") {
+                    return format!(
+                        r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                    );
+                }
+                if request.contains("/wda/locked") {
+                    return format!(r#"{{"value":{is_locked}}}"#);
+                }
+                healthy_runner_responder(request)
+            });
+            let status = SetupStatusFixture::absent();
+            let state = readiness_state_with_runner(runner.base());
+            let token = state.runner_lifecycle.try_begin_reconnecting().unwrap();
+
+            let outcome =
+                run_runner_readiness_wait(&state, token, short_budget(), status.path(), 0).await;
+
+            assert_eq!(outcome, RunnerReadinessOutcome::Ready);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(false));
+            runner.shutdown();
+        });
+    }
+
+    #[test]
+    fn runner_handoff_skips_unlock_after_transient_probe_failure_and_does_not_publish_after_release() {
+        block(async {
+            use tower::ServiceExt;
+            let unlock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_counter = unlock_calls.clone();
+            let mut runner = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            // Active runner experienced a transient probe failure (`up: false`),
+            // but was NOT released or reconnecting: handoff must not unlock it.
+            let state = readiness_state_with_runner(runner.base());
+            *recover(state.runner_health.lock()) = crate::runner::RunnerHealth::down();
+            let response = router(state.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(unlock_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(recover(state.runner_health.lock()).locked, Some(true));
+            runner.shutdown();
+
+            // Handoff starting during Reconnecting must not publish stale `up: true`
+            // and clear `released = true` if a release completes before handoff finishes.
+            let state_slot = Arc::new(std::sync::Mutex::new(None::<std::sync::Weak<AppState>>));
+            let reconnect_slot = Arc::new(std::sync::Mutex::new(None::<RunnerTransitionToken>));
+            let slot = state_slot.clone();
+            let recon = reconnect_slot.clone();
+            let unlock_calls2 = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls2 = unlock_calls2.clone();
+            let mut runner2 = MockRunner::start(move |request| {
+                if request.contains("POST /wda/unlock") {
+                    calls2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return r#"{"value":null}"#.to_string();
+                }
+                if request.contains("/wda/keepawake") {
+                    if let Some(state) = slot.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
+                        if let Some(token) = recon.lock().unwrap().take() {
+                            assert!(state.runner_lifecycle.finish_reconnecting(token));
+                            let rel = state.runner_lifecycle.try_begin_releasing().unwrap();
+                            state.released.store(true, std::sync::atomic::Ordering::Release);
+                            assert!(state.runner_lifecycle.finish_releasing(rel));
+                        }
+                    }
+                    return r#"{"value":{"active":false,"locked":true,"passcodeEnabled":false}}"#
+                        .to_string();
+                }
+                if request.contains("/wda/locked") {
+                    return r#"{"value":true}"#.to_string();
+                }
+                healthy_runner_responder(request)
+            });
+            let state2 = readiness_state_with_runner(runner2.base());
+            *state_slot.lock().unwrap() = Some(Arc::downgrade(&state2));
+            *reconnect_slot.lock().unwrap() =
+                Some(state2.runner_lifecycle.try_begin_reconnecting().unwrap());
+            let response = router(state2.clone())
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/agent/runner-handoff")
+                        .header("x-phone-control", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(unlock_calls2.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert!(
+                state2.released.load(std::sync::atomic::Ordering::Acquire),
+                "stale handoff from an earlier reconnect generation must not clear released"
+            );
+            runner2.shutdown();
         });
     }
 
@@ -32418,17 +33704,30 @@ mod read_path_gate_tests {
 
 #[cfg(test)]
 mod unlock_before_action_tests {
-    use super::should_unlock_before_action;
+    use super::{can_auto_unlock, should_probe_unlock_before_action};
     use crate::keep_awake::LockReport;
+    use crate::runner::KeepAwakeReport;
 
     #[test]
     fn unlocks_only_a_phone_seen_locked_without_a_passcode() {
-        assert!(should_unlock_before_action(Some(true), LockReport::Unknown));
-        assert!(should_unlock_before_action(None, LockReport::LockedNoPasscode));
-        assert!(should_unlock_before_action(Some(false), LockReport::LockedNoPasscode));
-        assert!(!should_unlock_before_action(Some(true), LockReport::LockedPasscode));
-        assert!(!should_unlock_before_action(Some(false), LockReport::Unknown));
-        assert!(!should_unlock_before_action(None, LockReport::Unlocked));
+        assert!(should_probe_unlock_before_action(Some(true), LockReport::Unknown));
+        assert!(should_probe_unlock_before_action(None, LockReport::LockedNoPasscode));
+        assert!(should_probe_unlock_before_action(Some(false), LockReport::LockedNoPasscode));
+        assert!(!should_probe_unlock_before_action(Some(true), LockReport::LockedPasscode));
+        assert!(!should_probe_unlock_before_action(Some(false), LockReport::Unknown));
+        assert!(!should_probe_unlock_before_action(None, LockReport::Unlocked));
+
+        let report = |locked, passcode| KeepAwakeReport {
+            active: false,
+            locked,
+            passcode,
+            auto_lock: None,
+        };
+        assert!(can_auto_unlock(&report(Some(true), Some(false))));
+        assert!(!can_auto_unlock(&report(Some(true), Some(true))));
+        assert!(!can_auto_unlock(&report(Some(true), None)));
+        assert!(!can_auto_unlock(&report(Some(false), Some(false))));
+        assert!(!can_auto_unlock(&report(None, Some(false))));
     }
 }
 

@@ -1477,9 +1477,13 @@ extension RunnerTests {
     case nil: throw RunnerError.failed("the lock state could not be read; nothing was pressed")
     case true?: break
     }
-    // A set passcode cannot be entered from here: say so without pressing anything, so a dark
-    // phone is not lit up just to show its keypad.
-    if IPURBridge.screenLockStatus()?["passcodeEnabled"]?.boolValue == true {
+    // A set or unreadable passcode cannot be entered from here: fail closed without pressing
+    // anything, so a dark phone is not lit up just to show its keypad.
+    guard let passcodeEnabled = IPURBridge.screenLockStatus()?["passcodeEnabled"]?.boolValue else {
+      throw RunnerError(status: 409, code: "unknown error",
+                        message: "passcode_status_unknown: could not verify whether a passcode is set; nothing was pressed")
+    }
+    if passcodeEnabled {
       throw RunnerError(status: 409, code: "unknown error",
                         message: "passcode_required: a passcode is set on this iPhone, so it cannot be unlocked remotely; unlock it in hand")
     }
