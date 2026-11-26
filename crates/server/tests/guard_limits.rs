@@ -173,5 +173,199 @@ fn blocked_apps_and_the_run_budget_refuse_before_anything_is_sent() {
         let next = feed["next"].as_u64().unwrap();
         let (_, later) = call(&state, "GET", &format!("/agent/activity?since={next}"), "").await;
         assert_eq!(later["items"], serde_json::json!([]), "{later}");
+
+        let unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let unlocks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let taps = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let unlocked_flag = unlocked.clone();
+        let unlocks_count = unlocks.clone();
+        let taps_count = taps.clone();
+        let mock_app = axum::Router::new().fallback(
+            move |method: axum::http::Method, uri: axum::http::Uri| {
+                let unlocked_flag = unlocked_flag.clone();
+                let unlocks_count = unlocks_count.clone();
+                let taps_count = taps_count.clone();
+                async move {
+                    let path = uri.path();
+                    let body = if method == axum::http::Method::POST && path == "/session" {
+                        SESSION.to_string()
+                    } else if path == "/wda/keepawake" {
+                        let is_locked = !unlocked_flag.load(std::sync::atomic::Ordering::Acquire);
+                        format!(
+                            r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                        )
+                    } else if method == axum::http::Method::POST && path == "/wda/unlock" {
+                        unlocks_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        unlocked_flag.store(true, std::sync::atomic::Ordering::Release);
+                        r#"{"value":null}"#.to_string()
+                    } else if path.contains("/wda/apps/list") {
+                        let bundle = if unlocked_flag.load(std::sync::atomic::Ordering::Acquire) {
+                            "com.example.bank"
+                        } else {
+                            "com.apple.springboard"
+                        };
+                        format!(r#"{{"value":[{{"bundleId":"{bundle}"}}]}}"#)
+                    } else if path.contains("/actions") {
+                        taps_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        r#"{"value":null}"#.to_string()
+                    } else if path.contains("/window/size") {
+                        r#"{"value":{"width":390,"height":844}}"#.to_string()
+                    } else {
+                        r#"{"value":null}"#.to_string()
+                    };
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_app).await;
+        });
+        let locked_state = build_state_with_runner(&format!("http://{addr}"));
+        *locked_state.runner_health.lock().unwrap() = server::runner::RunnerHealth {
+            up: true,
+            actionable: true,
+            locked: Some(true),
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/agent/actions")
+            .header("x-phone-control", "1")
+            .header("x-phone-owner", "unlock-guard-test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"steps":[{"kind":"action","action":{"type":"tap","x":0.5,"y":0.5}}]}"#,
+            ))
+            .unwrap();
+        let response = server::http::router(locked_state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert_eq!(json["error"], "blocked_app", "{json}");
+        assert_eq!(unlocks.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(taps.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Single-action `/agent/input` must also check foreground after unlocking.
+        unlocked.store(false, std::sync::atomic::Ordering::Release);
+        *locked_state.runner_health.lock().unwrap() = server::runner::RunnerHealth {
+            up: true,
+            actionable: true,
+            locked: Some(true),
+        };
+        let input_req = Request::builder()
+            .method("POST")
+            .uri("/agent/input")
+            .header("x-phone-control", "1")
+            .header("x-phone-owner", "unlock-guard-test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"type":"tap","x":0.5,"y":0.5}"#))
+            .unwrap();
+        let response = server::http::router(locked_state.clone())
+            .oneshot(input_req)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        server_task.abort();
+        assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+        assert_eq!(json["error"], "blocked_app", "{json}");
+        assert_eq!(unlocks.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(taps.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Ownership change while the post-unlock foreground GET is pending must
+        // report `control_scope_changed` with `outcome: "unknown"` and
+        // `retry_safe: false`, and dispatch zero text requests.
+        let text_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let text_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state_slot: Arc<Mutex<Option<std::sync::Weak<server::http::AppState>>>> =
+            Arc::default();
+        let text_calls_c = text_calls.clone();
+        let text_unlocked_c = text_unlocked.clone();
+        let slot_c = state_slot.clone();
+        let scope_app = axum::Router::new().fallback(
+            move |method: axum::http::Method, uri: axum::http::Uri| {
+                let text_calls_c = text_calls_c.clone();
+                let text_unlocked_c = text_unlocked_c.clone();
+                let slot_c = slot_c.clone();
+                async move {
+                    let path = uri.path();
+                    let body = if method == axum::http::Method::POST && path == "/session" {
+                        SESSION.to_string()
+                    } else if path == "/wda/keepawake" {
+                        let is_locked = !text_unlocked_c.load(std::sync::atomic::Ordering::Acquire);
+                        format!(
+                            r#"{{"value":{{"active":false,"locked":{is_locked},"passcodeEnabled":false}}}}"#
+                        )
+                    } else if method == axum::http::Method::POST && path == "/wda/unlock" {
+                        text_unlocked_c.store(true, std::sync::atomic::Ordering::Release);
+                        r#"{"value":null}"#.to_string()
+                    } else if path.contains("/wda/apps/list") {
+                        if let Some(st) = slot_c
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                        {
+                            st.owner_epoch
+                                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        }
+                        r#"{"value":[{"bundleId":"com.example.notes"}]}"#.to_string()
+                    } else if path.contains("/wda/keys") {
+                        text_calls_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        r#"{"value":null}"#.to_string()
+                    } else {
+                        r#"{"value":null}"#.to_string()
+                    };
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                }
+            },
+        );
+        let scope_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let scope_addr = scope_listener.local_addr().unwrap();
+        let scope_task = tokio::spawn(async move {
+            let _ = axum::serve(scope_listener, scope_app).await;
+        });
+        let scope_state = build_state_with_runner(&format!("http://{scope_addr}"));
+        *scope_state.runner_health.lock().unwrap() = server::runner::RunnerHealth {
+            up: true,
+            actionable: true,
+            locked: Some(true),
+        };
+        *state_slot.lock().unwrap() = Some(Arc::downgrade(&scope_state));
+        let text_req = Request::builder()
+            .method("POST")
+            .uri("/agent/input")
+            .header("x-phone-control", "1")
+            .header("x-phone-owner", "unlock-scope-text-test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"type":"text","text":"hello"}"#))
+            .unwrap();
+        let response = server::http::router(scope_state.clone())
+            .oneshot(text_req)
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        scope_task.abort();
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["error"], "control_scope_changed", "{json}");
+        assert_eq!(json["outcome"], "unknown", "{json}");
+        assert_eq!(json["retry_safe"], false, "{json}");
+        assert_eq!(text_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     });
 }
