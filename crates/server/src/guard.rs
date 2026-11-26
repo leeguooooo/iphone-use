@@ -339,7 +339,7 @@ fn launch_target(action: &Value) -> Option<String> {
 fn leaves_app(action: &Value) -> bool {
     match action.get("type").and_then(Value::as_str) {
         Some("home" | "launch_app" | "open_url") => true,
-        Some("shortcut") => action.get("name").and_then(Value::as_str) == Some("home"),
+        Some("shortcut") => matches!(action.get("name").and_then(Value::as_str), Some("home" | "lock")),
         _ => false,
     }
 }
@@ -484,6 +484,7 @@ mod tests {
         assert!(p.needs_foreground(&json!({"type":"shortcut","name":"spotlight"})));
         assert!(!p.needs_foreground(&json!({"type":"home"})));
         assert!(!p.needs_foreground(&json!({"type":"shortcut","name":"home"})));
+        assert!(!p.needs_foreground(&json!({"type":"shortcut","name":"lock"})));
         assert!(!p.needs_foreground(&json!({"type":"launch_app","bundle":"com.apple.Preferences"})));
         let refused =
             p.check_foreground(&["com.apple.springboard".into(), "com.example.bank".into()]);

@@ -298,7 +298,7 @@ pub struct KeyParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShortcutParams {
-    /// Home, Spotlight, Photos capture (`save_screenshot`), or physical-only `volume_up` / `volume_down`.
+    /// Home, Spotlight, screen lock (`lock`), Photos capture (`save_screenshot`), or physical-only `volume_up` / `volume_down`.
     /// App Switcher is unsupported by the device runner.
     pub name: String,
     /// Default true: reply with the settled screen (delta since your last
@@ -472,7 +472,7 @@ pub enum PhoneStep {
         #[serde(default)]
         after_ms: u64,
     },
-    /// `home` or `spotlight`.
+    /// `home`, `spotlight`, `lock`, `save_screenshot`, `volume_up`, or `volume_down`.
     Shortcut {
         name: String,
         /// Pause after this step, ms.
@@ -1869,7 +1869,8 @@ impl PhoneHandler {
             idempotent_hint = false,
             open_world_hint = true,
         ),
-        description = "System shortcut: home, spotlight, volume_up/volume_down (physical device; the ACK confirms \
+        description = "System shortcut: home, spotlight, lock (locks the screen; a passcode-protected phone \
+        requires a person to unlock it again), volume_up/volume_down (physical device; the ACK confirms \
         the request, not the level) or save_screenshot (a mutation, unlike phone_screenshot: the \
         receipt means requested, not saved; if iOS shows a preview choose Done/Save there, never \
         take another; check Photos before claiming saved). Never replay an uncertain capture or \
@@ -1883,7 +1884,7 @@ impl PhoneHandler {
         self.progress_reset();
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
-            "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down" => {
+            "home" | "spotlight" | "lock" | "save_screenshot" | "volume_up" | "volume_down" => {
                 send_input_observed(&self.daemon, &InputMsg::Shortcut { name }, observe).await
             }
             "switcher" => CallToolResult::error(vec![ContentBlock::text(
@@ -1892,7 +1893,7 @@ impl PhoneHandler {
                  supported device action instead",
             )]),
             _ => CallToolResult::error(vec![ContentBlock::text(format!(
-                "unsupported shortcut '{name}'; supported: home, spotlight, save_screenshot, volume_up, volume_down"
+                "unsupported shortcut '{name}'; supported: home, spotlight, lock, save_screenshot, volume_up, volume_down"
             ))]),
         }
     }
@@ -1924,9 +1925,23 @@ impl PhoneHandler {
             Ok(request) => request,
             Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
         };
+        let ends_with_lock = request["steps"]
+            .as_array()
+            .and_then(|steps| {
+                steps
+                    .iter()
+                    .rev()
+                    .find(|step| step.get("kind").and_then(|k| k.as_str()) != Some("pause"))
+            })
+            .is_some_and(|step| {
+                step.get("kind").and_then(|k| k.as_str()) == Some("action")
+                    && step["action"]["type"].as_str() == Some("shortcut")
+                    && step["action"]["name"].as_str() == Some("lock")
+            });
         // Observing by default: a batch is how an agent advances, and the
-        // screen it ends on is what the agent decides from next.
-        if observe.unwrap_or(true) {
+        // screen it ends on is what the agent decides from next. Skip implicit
+        // observation when the batch ends by locking the screen.
+        if observe.unwrap_or(!ends_with_lock) {
             request["observe"] = serde_json::json!(true);
         }
         // The batch entry point answers with the same structured result the
@@ -4366,9 +4381,9 @@ pub(crate) fn phone_steps_request(steps: Vec<PhoneStep>) -> Result<serde_json::V
             PhoneStep::Shortcut { name, after_ms } => {
                 validate_after(after_ms)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !matches!(name.as_str(), "home" | "spotlight" | "save_screenshot" | "volume_up" | "volume_down") {
+                if !matches!(name.as_str(), "home" | "spotlight" | "lock" | "save_screenshot" | "volume_up" | "volume_down") {
                     return Err(format!(
-                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, save_screenshot, volume_up, volume_down; no action was sent"
+                        "steps[{index}] has unsupported shortcut {name:?}; supported: home, spotlight, lock, save_screenshot, volume_up, volume_down; no action was sent"
                     ));
                 }
                 action_step(serde_json::json!({"type":"shortcut","name":name}), after_ms)
@@ -5240,6 +5255,56 @@ mod tests {
         (format!("http://{address}"), task)
     }
 
+    fn scripted_daemon_capturing_body(
+        status: &str,
+        body: Vec<u8>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<String>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let status = status.to_string();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_slot = captured.clone();
+        let task = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).ok();
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                            .ok();
+                        stream
+                            .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+                            .ok();
+                        let mut request = [0_u8; 8_192];
+                        let n = stream.read(&mut request).unwrap_or(0);
+                        let raw = String::from_utf8_lossy(&request[..n]);
+                        let req_body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+                        *captured_slot.lock().unwrap() = req_body.to_string();
+                        let head = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(&body);
+                        return;
+                    }
+                    Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        (format!("http://{address}"), captured, task)
+    }
+
     #[test]
     fn volume_shortcuts_are_sent_to_the_selected_daemon() {
         for name in ["volume_up", "volume_down"] {
@@ -5439,6 +5504,38 @@ mod tests {
         let step: PhoneStep = serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"save_screenshot"})).unwrap();
         let request = phone_steps_request(vec![step]).unwrap();
         assert_eq!(request["steps"][0]["action"]["name"], "save_screenshot");
+    }
+
+    #[test]
+    fn lock_shortcut_accepted_by_tool_and_batch_validation() {
+        let (url, task) = scripted_daemon("200 OK", br#"{"ok":true,"transport":"runner"}"#.to_vec());
+        let result = block(handler_for(&url).phone_shortcut(Parameters(ShortcutParams {
+            name: "lock".into(),
+            observe: Some(false),
+        })));
+        task.join().unwrap();
+        assert_ne!(result.is_error, Some(true));
+
+        let step: PhoneStep =
+            serde_json::from_value(serde_json::json!({"kind":"shortcut","name":"lock"})).unwrap();
+        let request = phone_steps_request(vec![step]).unwrap();
+        assert_eq!(request["steps"][0]["action"]["name"], "lock");
+
+        let (url, seen_body, task) = scripted_daemon_capturing_body(
+            "200 OK",
+            br#"{"ok":true,"completed":2,"applied_actions":1,"steps":[{"index":0,"kind":"action","ok":true},{"index":1,"kind":"pause","ok":true}]}"#.to_vec(),
+        );
+        let result = block(handler_for(&url).phone_run_steps(Parameters(RunStepsParams {
+            steps: vec![
+                serde_json::from_value(serde_json::json!({"kind":"shortcut","name":" LOCK "})).unwrap(),
+                serde_json::from_value(serde_json::json!({"kind":"pause","ms":50})).unwrap(),
+            ],
+            observe: None,
+        })));
+        task.join().unwrap();
+        assert_ne!(result.is_error, Some(true));
+        let sent: serde_json::Value = serde_json::from_str(&seen_body.lock().unwrap()).unwrap();
+        assert!(sent.get("observe").is_none(), "terminal lock batch should not default observe=true: {sent}");
     }
 
     /// With `observe:false` the result stays the short string callers

@@ -148,7 +148,7 @@ not an unrelated remote MCP client.
 | Tap a point | `tap` + `x`,`y` | `phone_tap` | `tap` |
 | Type | `text` (up to 20000 scalars; optional `budget_ms` 6000..15000 requires `inputContinuation`; use a returned `continue_token` alone, once; uncertain delivery requires inspecting the original field, never replaying the whole text) | `phone_type` | `type` (`input` names a runtime value) |
 | Key | `key` `return`… | `phone_key` | `key` |
-| Home / Spotlight / Photos capture / physical volume | `shortcut` (`home`, `spotlight`, `save_screenshot`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
+| Home / Spotlight / Lock / Photos capture / physical volume | `shortcut` (`home`, `spotlight`, `lock`, `save_screenshot`, `volume_up`, `volume_down`) | `phone_shortcut` | `shortcut` |
 | Scroll | `scroll` `dy` (80 ≈ 15% of a screen, 400 ≈ 75%) | `phone_scroll` (`x`, `y`, `dx`, `dy` required) | `scroll` (`x`, `y`, `dx`, `dy` required in MCP batches) |
 | System alert | `alert` `button` / `action` | `phone_run_steps` step | `alert` |
 | App asks you to log in | `POST /agent/login` (`iphone-use auth login --bwu`) | `phone_login` | — |
