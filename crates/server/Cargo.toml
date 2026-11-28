@@ -69,7 +69,7 @@ ring = "0.17"
 zune-jpeg = "0.5"
 
 # Scan-to-connect: the pairing page shows the one-time link as a QR code.
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+qrcode = { version = "0.15", default-features = false, features = ["svg"] }
 
 # Screens an app hides from capture (PayPay): a blank screenshot is detected
 # (png decode) and the accessibility tree is drawn over it (ab_glyph text).
