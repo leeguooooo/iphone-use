@@ -73,7 +73,7 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # Screens an app hides from capture (PayPay): a blank screenshot is detected
 # (png decode) and the accessibility tree is drawn over it (ab_glyph text).
-png = "0.17"
+png = "0.18"
 ab_glyph = "0.2"
 
 # App install reads the bundle id from the app's Info.plist (binary or XML);
